@@ -1,4 +1,4 @@
-package com.egron.lampan
+package com.github.obegron.lampan
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity

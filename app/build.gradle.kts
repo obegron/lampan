@@ -4,12 +4,12 @@ plugins {
 }
 
 android {
-    namespace = "com.egron.lampan"
+    namespace = "com.github.obegron.lampan"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
 
     defaultConfig {
-        applicationId = "com.egron.lampan"
+        applicationId = "com.github.obegron.lampan"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
