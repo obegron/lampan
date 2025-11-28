@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.github.obegron.lampan"
+    namespace = "com.egron.lampan"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
 
     defaultConfig {
-        applicationId = "com.github.obegron.lampan"
-        minSdk = 26
+        applicationId = "com.egron.lampan"
+        minSdk = 29
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
@@ -38,11 +38,11 @@ android {
         compose = true
     }
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.10"
+        kotlinCompilerExtensionVersion = "1.5.8"
     }
-    packaging {
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
         }
     }
 }
@@ -57,8 +57,10 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.bouncycastle.prov)
+    implementation("com.googlecode.plist:dd-plist:1.23")
     
     testImplementation(libs.junit)
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.10.0")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
@@ -66,3 +68,11 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 }
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "skipped", "failed")
+    }
+}
+

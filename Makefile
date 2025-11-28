@@ -17,5 +17,8 @@ run: install
 clean:
 	./gradlew clean
 
+test:
+	./gradlew test
+
 logcat:
 	adb logcat -s Lampan

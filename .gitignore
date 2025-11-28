@@ -1,3 +1,4 @@
+.idea
 # Built application files
 *.apk
 *.aar
@@ -17,6 +18,7 @@ out/
 
 # Gradle files
 .gradle/
+gradle/
 build/
 
 # Local configuration file (sdk.dir is not checked in)
@@ -53,7 +55,6 @@ captures/
 .cxx/
 
 # Google Services (e.g. APIs or Firebase)
-gradle/
 google-services.json
 
 # FreeMarker
