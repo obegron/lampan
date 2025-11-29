@@ -57,6 +57,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.bouncycastle.prov)
+//    implementation('org.bouncycastle:bcprov-jdk15on:1.70')
     implementation("com.googlecode.plist:dd-plist:1.23")
     
     testImplementation(libs.junit)
