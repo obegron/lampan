@@ -103,7 +103,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         serverAddress = InetAddress.getByName(host)
 
         val options = client.sendRequest("OPTIONS", "*", mapOf(
-            "User-Agent" to "PipeWire/1.4.9",
+            "User-Agent" to "Lampan/0.1.0",
             "DACP-ID" to clientInstance!!,
             "Client-Instance" to clientInstance!!
         ))
@@ -120,7 +120,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
            "Content-Type" to "application/octet-stream",
            "Client-Instance" to clientInstance!!,
            "DACP-ID" to clientInstance!!,
-           "User-Agent" to "PipeWire/1.4.9"
+           "User-Agent" to "Lampan/0.1.0"
         )
         
         val authSetup = client.sendRequest("POST", "/auth-setup", authSetupHeaders, rawBody = authRequestBody)
@@ -158,7 +158,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             "Content-Type" to "application/sdp",
             "Client-Instance" to clientInstance!!,
             "DACP-ID" to clientInstance!!,
-            "User-Agent" to "PipeWire/1.4.9"
+            "User-Agent" to "Lampan/0.1.0"
         )
 
         val announce = client.sendRequest("ANNOUNCE", "rtsp://$clientIp/$sessionId", 
@@ -187,7 +187,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         val setupHeaders = mapOf(
              "Client-Instance" to clientInstance!!,
              "DACP-ID" to clientInstance!!,
-             "User-Agent" to "PipeWire/1.4.9",
+             "User-Agent" to "Lampan/0.1.0",
              "Transport" to "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=$clientControlPort;timing_port=$clientTimingPort"
         )
         
@@ -218,7 +218,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         val recordHeaders = mutableMapOf(
              "Client-Instance" to clientInstance!!,
              "DACP-ID" to clientInstance!!,
-             "User-Agent" to "PipeWire/1.4.9",
+             "User-Agent" to "Lampan/0.1.0",
              "Range" to "npt=0-",
              "RTP-Info" to "seq=$rtpSeqNum;rtptime=$rtpTimestamp"
         )
@@ -390,7 +390,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
                 "Content-Type" to "text/parameters",
                 "Client-Instance" to clientInstance!!,
                 "DACP-ID" to clientInstance!!,
-                "User-Agent" to "PipeWire/1.4.9"
+                "User-Agent" to "Lampan/0.1.0"
             )
             if (serverSession != null) {
                 headers["Session"] = serverSession!!
@@ -406,7 +406,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             val headers = mutableMapOf(
                 "Client-Instance" to clientInstance!!,
                 "DACP-ID" to clientInstance!!,
-                "User-Agent" to "PipeWire/1.4.9"
+                "User-Agent" to "Lampan/0.1.0"
             )
             if (serverSession != null) {
                 headers["Session"] = serverSession!!

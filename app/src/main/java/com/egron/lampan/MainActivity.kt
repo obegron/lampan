@@ -167,7 +167,7 @@ fun MainScreen() {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Lampan - AirPlay Audio",
+            text = "Lampan - AirPlay",
             style = MaterialTheme.typography.headlineMedium
         )
         

@@ -147,7 +147,7 @@ class RaopIntegrationTest {
 
              // 1. OPTIONS
              val optionsResponse = client.sendRequest("OPTIONS", "*", mapOf(
-                "User-Agent" to "PipeWire/1.4.9",
+                "User-Agent" to "Lampan/0.1.0",
                 "DACP-ID" to clientInstance,
                 "Client-Instance" to clientInstance
              ))
@@ -165,7 +165,7 @@ class RaopIntegrationTest {
                     "Content-Type" to "application/octet-stream",
                     "Client-Instance" to clientInstance,
                     "DACP-ID" to clientInstance,
-                    "User-Agent" to "PipeWire/1.4.9"
+                    "User-Agent" to "Lampan/0.1.0"
                  )
                  val authSetupResponse = client.sendRequest("POST", "/auth-setup", authSetupHeaders, rawBody = authRequestBody)
                  println("AUTH-SETUP Response: ${authSetupResponse.code}")
@@ -191,7 +191,7 @@ class RaopIntegrationTest {
                         "Content-Type" to "application/sdp",
                         "Client-Instance" to clientInstance,
                         "DACP-ID" to clientInstance,
-                        "User-Agent" to "PipeWire/1.4.9"
+                        "User-Agent" to "Lampan/0.1.0"
                      )
                      val announce = client.sendRequest("ANNOUNCE", "rtsp://$clientIp/$sessionId", announceHeaders, sdp)
                      println("ANNOUNCE Response: ${announce.code}")
@@ -203,7 +203,7 @@ class RaopIntegrationTest {
                          val setupHeaders = mapOf(
                              "Client-Instance" to clientInstance,
                              "DACP-ID" to clientInstance,
-                             "User-Agent" to "PipeWire/1.4.9",
+                             "User-Agent" to "Lampan/0.1.0",
                              "Transport" to "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=${controlSocket.localPort};timing_port=${timingSocket.localPort}"
                          )
                          val setup = client.sendRequest("SETUP", "rtsp://$clientIp/$sessionId", setupHeaders)
@@ -244,7 +244,7 @@ class RaopIntegrationTest {
                              val recordHeaders = mapOf(
                                  "Client-Instance" to clientInstance,
                                  "DACP-ID" to clientInstance,
-                                 "User-Agent" to "PipeWire/1.4.9",
+                                 "User-Agent" to "Lampan/0.1.0",
                                  "Session" to serverSession,
                                  "Range" to "npt=0-",
                                  "RTP-Info" to "seq=0;rtptime=0"
@@ -259,7 +259,7 @@ class RaopIntegrationTest {
                                  val paramHeaders = mapOf(
                                      "Client-Instance" to clientInstance,
                                      "DACP-ID" to clientInstance,
-                                     "User-Agent" to "PipeWire/1.4.9",
+                                     "User-Agent" to "Lampan/0.1.0",
                                      "Session" to serverSession,
                                      "Content-Type" to "text/parameters"
                                  )

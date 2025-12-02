@@ -17,6 +17,9 @@ run: install
 clean:
 	./gradlew clean
 
+serve:
+	python -m http.server -d app/build/outputs/apk/debug/
+
 test:
 	./gradlew test
 
