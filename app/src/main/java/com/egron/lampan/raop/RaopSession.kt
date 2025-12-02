@@ -334,7 +334,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             val packetBytes = buffer.array()
             val packet = DatagramPacket(packetBytes, packetBytes.size, serverAddress!!, serverControlPort)
             clientControlSocket?.send(packet)
-            log("Sent Sync Packet (first=$first) to $serverControlPort")
+            // log("Sent Sync Packet (first=$first) to $serverControlPort")
             
         } catch (e: Exception) {
             log("Error sending sync packet: ${e.message}")

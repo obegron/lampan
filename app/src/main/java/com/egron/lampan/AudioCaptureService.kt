@@ -49,7 +49,9 @@ class AudioCaptureService : Service() {
             }
             "SET_VOLUME" -> {
                 val vol = intent.getFloatExtra("VOLUME", 1.0f)
-                raopSession?.setVolume(vol)
+                scope.launch {
+                    raopSession?.setVolume(vol)
+                }
             }
         }
         return START_NOT_STICKY

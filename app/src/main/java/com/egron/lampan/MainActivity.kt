@@ -97,7 +97,7 @@ fun MainScreen() {
                 } else if (intent?.action == "com.egron.lampan.STATUS") {
                     val status = intent.getStringExtra("STATUS_MSG")
                     if (status != null) {
-                        statusLogs = statusLogs + status
+                        statusLogs = (statusLogs + status).takeLast(100)
                     }
                 }
             }
