@@ -7,7 +7,8 @@ class RtpPacket(
     private val seqNum: Int,
     private val timestamp: Long,
     private val ssrc: Int,
-    private val data: ByteArray
+    private val data: ByteArray,
+    private val marker: Boolean = false
 ) {
     fun toByteArray(): ByteArray {
         val size = 12 + data.size
@@ -16,11 +17,12 @@ class RtpPacket(
         // Byte 0: V=2, P=0, X=0, CC=0
         buffer.put(0x80.toByte())
 
-        // Byte 1: M=0 (usually), PT=payloadType
-        // Marker bit is typically 1 for the first packet of a talkspurt, 0 otherwise.
-        // For continuous audio, it's usually 0? AirPlay might use 1 for Sync? 
-        // Let's stick to 0x60 (96) | 0x80 if M=1.
-        buffer.put(payloadType.toByte())
+        // Byte 1: M=Marker, PT=payloadType
+        var b1 = payloadType
+        if (marker) {
+            b1 = b1 or 0x80
+        }
+        buffer.put(b1.toByte())
 
         // Bytes 2-3: Sequence Number
         buffer.putShort(seqNum.toShort())

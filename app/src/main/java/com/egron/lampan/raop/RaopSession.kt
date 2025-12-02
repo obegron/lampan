@@ -1,31 +1,26 @@
 package com.egron.lampan.raop
 
 import android.util.Log
-import java.math.BigInteger
-import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.DatagramPacket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
-import java.security.KeyFactory
+import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.security.Security
-import java.security.spec.RSAPublicKeySpec
-import java.util.Base64
 import java.util.Random
-import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
+import javax.crypto.KeyAgreement
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair
-import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.generators.X25519KeyPairGenerator
+import org.bouncycastle.crypto.KeyGenerationParameters
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
-import org.bouncycastle.crypto.KeyGenerationParameters
+import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.jce.provider.BouncyCastleProvider
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class RaopSession(private var host: String, private val port: Int = 7000, private val logCallback: ((String) -> Unit)? = null) {
@@ -38,7 +33,6 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     private var clientControlSocket: DatagramSocket? = null
     private var clientTimingSocket: DatagramSocket? = null
     private var clientAudioSocket: DatagramSocket? = null
-    private var syncJob: kotlinx.coroutines.Job? = null
     
     private var serverAudioPort: Int = -1
     private var serverControlPort: Int = -1
@@ -48,44 +42,51 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     
     private var rtpSeqNum = 0
     private var rtpTimestamp = 0L
+    private var ssrc = 0
+    private var packetCount = 0L
+    private var firstSyncSent = false
+    private val encoder = AlacEncoder()
     private val random = Random() 
-    
-    private val alacEncoder = AlacEncoder()
-    private val aesKey = ByteArray(16)
-    private val aesIv = ByteArray(16)
-    private var aesCipher: Cipher? = null
-    private var aesKeySpec: SecretKeySpec? = null
-    private var aesIvSpec: IvParameterSpec? = null
 
-    // Hardcoded RSA Public Key for AirPlay (Apple's Airport Express Key)
-    private val rsaModulusBase64 = "59dE8qLieItsH1WgjrcFRKj6eUWqi+bGLOX1HL3U3GhC/j0Qg90u3sG/1CUtwC5vOYvfDmFI6oSFXi5ELabWJmT2dKHzBJKa3k9ok+8t9ucRqMd6DZHJ2YCCLlDRKSKv6kDqnw4UwPdpOMXziC/AMj3Z/lUVX1G7WSHCAWKf1zNS1eLvqr+boEjXuBOitnZ/bDzPHrTOZz0Dew0uowxf/+sG+NCK3eQJVxqcaJ/vEHKIVd2M+5qL71yJQ+87X6oV3eaYvt3zWZYD6z5vYTcrtij2VZ9Zmni/UAaHqn9JdsBWLUEpVviYnhimNVvYFZeCXg/IdTQ+x4IRdiXNv5hEew=="
-    private val rsaExponentBase64 = "AQAB"
+    // Force L16 PCM mode via "Uncompressed ALAC"
+    private val useL16 = true
+    private val latencySamples = 11025
 
     private fun log(msg: String) {
         Log.i(TAG, msg)
         logCallback?.invoke(msg)
     }
 
-    private fun toHex(bytes: ByteArray): String {
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
-
     // New method for integration tests to set internal state directly
-    fun setupForTest(testClientIp: String, testSessionId: String, testClientInstance: String, testHost: String, testServerAudioPort: Int, testServerSession: String?, testClientAudioSocket: DatagramSocket?) {
+    fun setupForTest(testClientIp: String, testSessionId: String, testClientInstance: String, testHost: String, testServerAudioPort: Int, testServerSession: String?, testClientAudioSocket: DatagramSocket?, testClientControlSocket: DatagramSocket?, testServerControlPort: Int) {
         this.host = testHost 
         this.sessionId = testSessionId
         this.clientInstance = testClientInstance
         this.serverAudioPort = testServerAudioPort
+        this.serverControlPort = testServerControlPort
         this.serverSession = testServerSession
         this.clientAudioSocket = testClientAudioSocket
+        this.clientControlSocket = testClientControlSocket
+        try {
+            this.serverAddress = InetAddress.getByName(testHost)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     suspend fun connect() {
-        client.connect() 
+        client.connect()
         
         if (sessionId == null) { 
             sessionId = (Math.abs(random.nextInt()) % 1000000000 + 100000000).toString() 
-        } 
+        }
+        
+        // Randomize RTP state
+        rtpSeqNum = random.nextInt(65536)
+        rtpTimestamp = Math.abs(random.nextLong())
+        ssrc = random.nextInt()
+        packetCount = 0
+        firstSyncSent = false
         
         if (clientInstance == null) { 
             val clientInstanceBytes = ByteArray(8)
@@ -94,12 +95,11 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         }
         if (activeRemote == null) { 
             activeRemote = Math.abs(random.nextInt()).toString() 
-        } 
+        }
         
         val clientIp = getLocalIpAddress() ?: "127.0.0.1"
         log("RaopSession: Client IP is $clientIp, Target: $host:$port")
 
-        // Resolve host once
         serverAddress = InetAddress.getByName(host)
 
         val options = client.sendRequest("OPTIONS", "*", mapOf(
@@ -109,15 +109,40 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         ))
         log("OPTIONS code ${options.code}")
 
-        // Setup Encryption (AES + RSA)
-        // setupEncryption()
-        // val rsaAesKeyEncoded = encryptAesKeyWithRsa()
-        //val aesIvEncoded = Base64.getEncoder().encodeToString(aesIv).trim()
-        //val appleChallengeEncoded = generateAppleChallenge()
-
-        // Standard AirPlay 1 SDP
+        val bcClientKeyPair = generateCurve25519KeyPairBouncyCastle()
+        val clientPublicKeyBytes = (bcClientKeyPair.public as X25519PublicKeyParameters).encoded
+        
+        val authRequestBody = ByteArray(33)
+        authRequestBody[0] = 0x01.toByte() 
+        System.arraycopy(clientPublicKeyBytes, 0, authRequestBody, 1, 32)
+        
+        val authSetupHeaders = mapOf(
+           "Content-Type" to "application/octet-stream",
+           "Client-Instance" to clientInstance!!,
+           "DACP-ID" to clientInstance!!,
+           "User-Agent" to "PipeWire/1.4.9"
+        )
+        
+        val authSetup = client.sendRequest("POST", "/auth-setup", authSetupHeaders, rawBody = authRequestBody)
+        if (authSetup.code != 200) {
+            val errorMsg = "AUTH-SETUP failed: ${authSetup.code}"
+            log(errorMsg)
+            throw Exception(errorMsg)
+        }
+        
+        delay(200)
+        
+        val serverCurve25519PublicKeyBytes = client.parseAuthSetupResponse(authSetup.rawBody)
+        val bcAgreement = X25519Agreement()
+        bcAgreement.init(bcClientKeyPair.private)
+        val serverBCPublicKeyParams = X25519PublicKeyParameters(serverCurve25519PublicKeyBytes, 0)
+        val sharedSecretBytes = ByteArray(bcAgreement.agreementSize)
+        bcAgreement.calculateAgreement(serverBCPublicKeyParams, sharedSecretBytes, 0)
+        
+        log("Shared Secret (first 8 bytes): ${sharedSecretBytes.take(8).joinToString("") { "%02x".format(it) }}...")
+        
+        // Announce AppleLossless (ALAC)
         val rtpMapLine = "a=rtpmap:96 AppleLossless"
-        val fmtpLine = "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100"
 
         val sdp = "v=0\r\n" +
              "o=iTunes $sessionId 0 IN IP4 $clientIp\r\n" +
@@ -126,15 +151,14 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
              "t=0 0\r\n" +
              "m=audio 0 RTP/AVP 96\r\n" +
              "$rtpMapLine\r\n" +
-             "$fmtpLine\r\n" +
-             "a=min-latency:11025"
-        log("SDP Content:\n$sdp")
+             "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n" +
+             "a=min-latency:$latencySamples"
 
         val announceHeaders = mapOf(
             "Content-Type" to "application/sdp",
             "Client-Instance" to clientInstance!!,
             "DACP-ID" to clientInstance!!,
-            "User-Agent" to "PipeWire/1.4.9",
+            "User-Agent" to "PipeWire/1.4.9"
         )
 
         val announce = client.sendRequest("ANNOUNCE", "rtsp://$clientIp/$sessionId", 
@@ -143,12 +167,11 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         if (announce.code != 200) {
             val errorMsg = "ANNOUNCE failed: ${announce.code}"
             log(errorMsg)
-            // Proceeding anyway as some devices might be lax, but usually this is fatal
+            throw Exception(errorMsg)
         }
         
-        delay(200) 
+        delay(200)
 
-        // Only create sockets if not set by test
         if (clientControlSocket == null) clientControlSocket = DatagramSocket(0)
         if (clientTimingSocket == null) clientTimingSocket = DatagramSocket(0)
         if (clientAudioSocket == null) clientAudioSocket = DatagramSocket(0)
@@ -160,7 +183,6 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         
         startUdpListener(clientControlSocket!!, "Control")
         startUdpListener(clientTimingSocket!!, "Timing")
-        // startSyncSender() removed from here
 
         val setupHeaders = mapOf(
              "Client-Instance" to clientInstance!!,
@@ -180,9 +202,10 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         if (serverTransportHeader != null) {
             val parts = serverTransportHeader.split(";")
             for (part in parts) {
-                if (part.startsWith("server_port=")) serverAudioPort = part.substringAfter("=").toInt()
-                if (part.startsWith("control_port=")) serverControlPort = part.substringAfter("=").toInt()
-                if (part.startsWith("timing_port=")) serverTimingPort = part.substringAfter("=").toInt()
+                val p = part.trim()
+                if (p.startsWith("server_port=")) serverAudioPort = p.substringAfter("=").toInt()
+                if (p.startsWith("control_port=")) serverControlPort = p.substringAfter("=").toInt()
+                if (p.startsWith("timing_port=")) serverTimingPort = p.substringAfter("=").toInt()
             }
             log("Server ports: Audio=$serverAudioPort, Control=$serverControlPort, Timing=$serverTimingPort")
         }
@@ -191,16 +214,6 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         if (serverSession != null) {
             log("Server Session ID: $serverSession")
         }
-        
-        // Send initial sync and silence to prime receiver
-        startSyncSender()
-        log("Sending pre-record silence...")
-        val silencePcm = ByteArray(352 * 4) // 352 samples * 4 bytes (16-bit stereo)
-        for (i in 0 until 10) {
-            sendFrame(silencePcm)
-            delay(8)
-        }
-        sendSync()
         
         val recordHeaders = mutableMapOf(
              "Client-Instance" to clientInstance!!,
@@ -222,71 +235,14 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             throw Exception(errorMsg)
         }
         
-        // Send ~2 seconds of silence (250 packets of 352 samples) to wake up receiver / sync
-        log("Sending silence burst...")
-        for (i in 0 until 250) {
-            sendFrame(silencePcm)
-            delay(8) // ~7.98ms per frame
-        }
-        log("Silence burst finished.")
-        sendSync()
+        // Send initial Sync packet immediately
+        sendSyncPacket(true)
+        firstSyncSent = true
         
-        // Set initial volume to ~-10dB (0.66 * 30 - 30 = -10.2)
-        // 0dB might be too loud or ignored.
+        // Set initial volume to max (0dB)
         delay(100)
-        setVolume(0.66f)
-        log("Initial volume set to -10dB (approx)")
-    }
-
-    private fun setupEncryption() {
-        SecureRandom().nextBytes(aesKey)
-        SecureRandom().nextBytes(aesIv)
-        
-        try {
-            aesKeySpec = SecretKeySpec(aesKey, "AES")
-            aesIvSpec = IvParameterSpec(aesIv)
-            aesCipher = Cipher.getInstance("AES/CBC/NoPadding")
-            aesCipher!!.init(Cipher.ENCRYPT_MODE, aesKeySpec, aesIvSpec)
-        } catch (e: Exception) {
-            log("Error initializing AES cipher: ${e.message}")
-            e.printStackTrace()
-        }
-    }
-
-private fun encryptAesKeyWithRsa(): String {
-    try {
-        val modulusBytes = Base64.getDecoder().decode(rsaModulusBase64)
-        val exponentBytes = Base64.getDecoder().decode(rsaExponentBase64)
-
-        // BigInteger constructor: BigInteger(signum, magnitude)
-        // signum=1 means positive, but magnitude must not be null or have leading zeros
-        val modulus = BigInteger(1, modulusBytes)
-        val exponent = BigInteger(1, exponentBytes)
-
-        val spec = RSAPublicKeySpec(modulus, exponent)
-        val factory = KeyFactory.getInstance("RSA")
-        val pubKey = factory.generatePublic(spec)
-
-        // Use BouncyCastle provider for OAEP padding
-        Security.removeProvider("BC")
-        Security.addProvider(BouncyCastleProvider())
-
-        val rsaCipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-1AndMGF1Padding", "BC")
-        rsaCipher.init(Cipher.ENCRYPT_MODE, pubKey)
-        val encryptedKey = rsaCipher.doFinal(aesKey)
-
-        return Base64.getEncoder().encodeToString(encryptedKey).trim()
-    } catch (e: Exception) {
-        log("RSA Encryption failed: ${e.message}")
-        e.printStackTrace()
-        throw e // Don't return empty string, let it fail loudly
-    }
-}
-
-    private fun generateAppleChallenge(): String {
-        val challenge = ByteArray(16)
-        SecureRandom().nextBytes(challenge)
-        return Base64.getEncoder().withoutPadding().encodeToString(challenge).trim()
+        setVolume(1.0f)
+        log("Initial volume set to 1.0")
     }
 
     private fun startUdpListener(socket: DatagramSocket, name: String) {
@@ -300,7 +256,7 @@ private fun encryptAesKeyWithRsa(): String {
                     socket.receive(packet)
                     val len = packet.length
                     val hex = buffer.take(minOf(len, 16)).joinToString("") { "%02x".format(it) }
-                    log("UDP $name received $len bytes from ${packet.address}:${packet.port}: $hex...")
+                    // log("UDP $name received $len bytes from ${packet.address}:${packet.port}: $hex...")
                     
                     if (name == "Timing" && len >= 32 && buffer[0] == 0x80.toByte() && buffer[1] == 0xD2.toByte()) {
                         val response = ByteArray(32)
@@ -313,7 +269,7 @@ private fun encryptAesKeyWithRsa(): String {
                         putLong(response, 24, nowNtp)
                         val reply = DatagramPacket(response, 32, packet.address, packet.port)
                         socket.send(reply)
-                        log("Sent Timing Reply (0xD3) to ${packet.address}:${packet.port}")
+                        // log("Sent Timing Reply (0xD3) to ${packet.address}:${packet.port}")
                     }
                 }
             } catch (e: Exception) {
@@ -340,47 +296,84 @@ private fun encryptAesKeyWithRsa(): String {
         }
     }
 
+    // Send UDP Sync Packet (Type 84) to Control Port
+    private fun sendSyncPacket(first: Boolean) {
+        if (serverControlPort == -1 || clientControlSocket == null || serverAddress == null) {
+            log("Skipping Sync Packet: serverControlPort=$serverControlPort, socket=${clientControlSocket != null}, address=$serverAddress")
+            return
+        }
+        
+        try {
+            // Sync Packet (PT=84) - 20 bytes
+            // Header (8 bytes):
+            // Byte 0: If first, X=1 (0x90). Else X=0 (0x80). V=2, P=0, CC=0.
+            val b0 = if (first) 0x90 else 0x80
+            
+            val buffer = ByteBuffer.allocate(20) 
+            
+            buffer.put(b0.toByte()) 
+            buffer.put(0xD4.toByte()) // M=1, PT=84
+            
+            // Sequence number 7 (Little Endian to match PipeWire quirk: 07 00)
+            buffer.put(7.toByte())
+            buffer.put(0.toByte())
+            
+            // Header Timestamp: current RTP timestamp minus latency
+            buffer.putInt((rtpTimestamp - latencySamples).toInt())
+            
+            // Payload (12 bytes): 
+            // NTP (8 bytes) + RTP (4 bytes)
+            
+            // NTP Timestamp (Current wall clock)
+            val nowNtp = ntpTime()
+            buffer.putLong(nowNtp)
+            
+            // RTP Timestamp (Current stream time)
+            buffer.putInt(rtpTimestamp.toInt())
+            
+            val packetBytes = buffer.array()
+            val packet = DatagramPacket(packetBytes, packetBytes.size, serverAddress!!, serverControlPort)
+            clientControlSocket?.send(packet)
+            log("Sent Sync Packet (first=$first) to $serverControlPort")
+            
+        } catch (e: Exception) {
+            log("Error sending sync packet: ${e.message}")
+        }
+    }
+
     fun sendFrame(pcm: ByteArray) {
         if (serverAudioPort == -1 || clientAudioSocket == null) return
 
         try {
-            // 1. Encode PCM to ALAC (Raw PCM wrapped in ALAC)
-            val alacData = alacEncoder.encode(pcm, 352) 
-            // 352 samples is standard frame size for AirPlay. 
-            // Input pcm should be 352 * 4 = 1408 bytes.
-            
-            // 2. Encrypt using AES-CBC, but only multiples of 16 bytes
-            val encryptedData = alacData.clone()
-            val lenToEncrypt = alacData.size and 0x0F.inv() // Clear last 4 bits -> multiple of 16
-            
-            if (lenToEncrypt > 0 && aesCipher != null && aesKeySpec != null && aesIvSpec != null) {
-                 // Re-init cipher to ensure IV is reset/reused per packet as per AirPlay spec
-                 aesCipher!!.init(Cipher.ENCRYPT_MODE, aesKeySpec, aesIvSpec)
-                 val cipherOutput = aesCipher!!.doFinal(encryptedData, 0, lenToEncrypt)
-                 System.arraycopy(cipherOutput, 0, encryptedData, 0, cipherOutput.size)
-                 // The remaining bytes (alacData.size - lenToEncrypt) are left as is in encryptedData
+            // Send Sync packet on first frame (if not sent yet) and periodically
+            if (!firstSyncSent) {
+                sendSyncPacket(true)
+                firstSyncSent = true
+            } else if (packetCount > 0 && packetCount % 125L == 0L) {
+                sendSyncPacket(false)
             }
 
+            // Use AlacEncoder (Uncompressed ALAC wrapper)
+            val encodedData = encoder.encode(pcm)
+            
             val packet = RtpPacket(
                 payloadType = 96,
                 seqNum = rtpSeqNum,
                 timestamp = rtpTimestamp,
-                ssrc = 0x12345678,
-                data = encryptedData
+                ssrc = ssrc,
+                data = encodedData,
+                marker = packetCount == 0L // Set marker bit for the first audio packet
             )
             
             val packetBytes = packet.toByteArray()
             if (serverAddress != null) {
                 val dp = DatagramPacket(packetBytes, packetBytes.size, serverAddress!!, serverAudioPort)
                 clientAudioSocket?.send(dp)
-                
-                if (rtpSeqNum < 5) {
-                    log("Sent RTP Packet Seq=${rtpSeqNum} TS=$rtpTimestamp Len=${packetBytes.size} (Encrypted)")
-                }
             }
             
             rtpSeqNum = (rtpSeqNum + 1) % 65536
-            rtpTimestamp += 352 
+            rtpTimestamp += (pcm.size / 4)
+            packetCount++
             
         } catch (e: Exception) {
             log("Send error: ${e.message}")
@@ -388,13 +381,11 @@ private fun encryptAesKeyWithRsa(): String {
     }
 
     fun setVolume(vol: Float) {
-        // Map 0.0-1.0 to -30.0 to 0.0 dB
         val clampedVol = vol.coerceIn(0.0f, 1.0f)
         val db = if (clampedVol == 0.0f) -144.0f else (clampedVol * 30.0f) - 30.0f
         
         try {
-            // Format to match pcap style "volume: -8.699799"
-            val content = "volume: %.6f".format(db)
+            val content = "volume: $db"
             val headers = mutableMapOf(
                 "Content-Type" to "text/parameters",
                 "Client-Instance" to clientInstance!!,
@@ -411,7 +402,6 @@ private fun encryptAesKeyWithRsa(): String {
     }
 
     fun stop() {
-        syncJob?.cancel()
         try {
             val headers = mutableMapOf(
                 "Client-Instance" to clientInstance!!,
@@ -429,51 +419,6 @@ private fun encryptAesKeyWithRsa(): String {
         clientControlSocket?.close()
         clientTimingSocket?.close()
         clientAudioSocket?.close()
-    }
-    
-    private fun startSyncSender() {
-        syncJob = scope.launch {
-            while (true) {
-                sendSync()
-                delay(3000)
-            }
-        }
-    }
-
-    private fun sendSync() {
-        if (serverControlPort == -1 || clientControlSocket == null) return
-        
-        try {
-            val buffer = ByteArray(20)
-            // Header: 0x80 0xD4 0x00 0x04
-            buffer[0] = 0x80.toByte()
-            buffer[1] = 0xD4.toByte()
-            buffer[2] = 0x00
-            buffer[3] = 0x04
-            
-            val nowRtp = rtpTimestamp
-            val nowNtp = ntpTime()
-            
-            // RTP Timestamp (active/next)
-            putInt(buffer, 4, nowRtp.toInt())
-            // NTP Timestamp
-            putLong(buffer, 8, nowNtp)
-            // RTP Timestamp (capture/now)
-            putInt(buffer, 16, nowRtp.toInt())
-            
-            val dp = DatagramPacket(buffer, buffer.size, serverAddress!!, serverControlPort)
-            clientControlSocket?.send(dp)
-            // log("Sent Sync (0xD4) to Control Port $serverControlPort: ${toHex(buffer)}")
-        } catch (e: Exception) {
-            log("Sync error: ${e.message}")
-        }
-    }
-
-    private fun putInt(buffer: ByteArray, offset: Int, value: Int) {
-        buffer[offset] = (value shr 24).toByte()
-        buffer[offset + 1] = (value shr 16).toByte()
-        buffer[offset + 2] = (value shr 8).toByte()
-        buffer[offset + 3] = value.toByte()
     }
     
     private fun generateCurve25519KeyPairBouncyCastle(): AsymmetricCipherKeyPair {
