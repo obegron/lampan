@@ -64,9 +64,9 @@ class RtspClient(private val host: String, private val port: Int, private val lo
                 log(body)
             } else {
                 log("<Binary Body: ${contentBytes.size} bytes>")
-                // Log hex dump of first 32 bytes for verification
-                val hex = contentBytes.take(32).joinToString("") { "%02x".format(it) }
-                log("Body Hex (first 32): $hex")
+                // Log hex dump
+                val hex = contentBytes.joinToString("") { "%02x".format(it) }
+                log("Body Hex: $hex")
             }
         }
         log("-----------------------")
@@ -104,8 +104,7 @@ class RtspClient(private val host: String, private val port: Int, private val lo
         log("--- Received Response ---")
         log(statusLine)
         headers.forEach { (k, v) -> log("$k: $v") }
-        log("-------------------------")
-
+        
         val contentLength = headers["Content-Length"]?.toIntOrNull() ?: 0
         val rawBodyBytes = if (contentLength > 0) {
             val buffer = ByteArray(contentLength)
@@ -119,6 +118,18 @@ class RtspClient(private val host: String, private val port: Int, private val lo
         } else {
             ByteArray(0)
         }
+        
+        if (rawBodyBytes.isNotEmpty()) {
+            val contentType = headers["Content-Type"] ?: ""
+            if (contentType.startsWith("text/") || contentType.contains("sdp")) {
+                 log("Body: ${String(rawBodyBytes, StandardCharsets.UTF_8)}")
+            } else {
+                 log("<Binary Body: ${rawBodyBytes.size} bytes>")
+                 val hex = rawBodyBytes.joinToString("") { "%02x".format(it) }
+                 log("Body Hex: $hex")
+            }
+        }
+        log("-------------------------")
         
         val bodyString = if (rawBodyBytes.isNotEmpty()) String(rawBodyBytes, StandardCharsets.ISO_8859_1) else ""
 
