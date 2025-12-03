@@ -5,6 +5,7 @@ import com.egron.lampan.raop.RaopSession
 import com.egron.lampan.raop.RtpPacket
 import com.egron.lampan.raop.RtspClient
 import org.junit.Test
+import org.junit.Assert.assertEquals
 import java.io.File
 import java.util.Base64
 import java.security.cert.X509Certificate
@@ -35,7 +36,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.sin
 import kotlin.math.PI
 
-class RaopIntegrationTest {
+class RaopSonyTvTest {
 
     private fun generateCurve25519KeyPairBouncyCastle(): AsymmetricCipherKeyPair {
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
@@ -115,9 +116,9 @@ class RaopIntegrationTest {
         return buffer
     }
 
-    // @Test
+    @Test
     fun testDiscoveryAndHandshake() {
-        val targetIp = "192.168.0.21"
+        val targetIp = "192.168.0.12"
         val targetPort = 7000
 
         println("Connecting to $targetIp:$targetPort...")
@@ -138,8 +139,8 @@ class RaopIntegrationTest {
              val clientInstance = clientInstanceBytes.joinToString("") { "%02X".format(it) }
 
              // Sockets
-             val controlSocket = DatagramSocket(6001) 
-             val timingSocket = DatagramSocket(6002) 
+             val controlSocket = DatagramSocket(0) 
+             val timingSocket = DatagramSocket(0) 
              val clientAudioSocket = DatagramSocket(0) 
 
              startUdpListener(controlSocket, "Control")
@@ -147,11 +148,41 @@ class RaopIntegrationTest {
 
              // 1. OPTIONS
              val optionsResponse = client.sendRequest("OPTIONS", "*", mapOf(
-                "User-Agent" to "Lampan/0.1.0",
+                "User-Agent" to "AirPlay/377.40.00",
                 "DACP-ID" to clientInstance,
                 "Client-Instance" to clientInstance
              ))
              println("OPTIONS Response: ${optionsResponse.code}")
+             
+             if (optionsResponse.code == 403) {
+                 println("Target requires pairing (403 on OPTIONS). Attempting /pair-setup...")
+                 
+                 // Reconnect to ensure clean state
+                 client.close()
+                 client.connect()
+                 
+                 val pairSetupHeaders = mapOf(
+                    "Content-Type" to "application/octet-stream",
+                    "User-Agent" to "AirPlay/377.40.00"
+                 )
+                 // Dummy body for pair-setup (usually it's a plist or binary TLV)
+                 // Just sending a minimal 33 byte dummy (0x01 + 32 bytes) to match curl test
+                 val dummyBody = ByteArray(33)
+                 dummyBody[0] = 0x01.toByte()
+                 // Fill the rest with random bytes as some devices might reject all-zero payloads
+                 val randomBytes = ByteArray(32)
+                 Random().nextBytes(randomBytes)
+                 System.arraycopy(randomBytes, 0, dummyBody, 1, 32)
+                 
+                 val pairSetupResponse = client.sendRequest("POST", "/pair-setup", pairSetupHeaders, rawBody = dummyBody)
+                 println("PAIR-SETUP Response: ${pairSetupResponse.code}")
+                 
+                 assertEquals(200, pairSetupResponse.code)
+                 if (pairSetupResponse.code == 200) {
+                     println("Pairing initiated successfully. Full pairing requires SRP/PIN implementation.")
+                     return
+                 }
+             }
              
              if (optionsResponse.code == 200) {
                  // 2. POST /auth-setup
@@ -165,10 +196,11 @@ class RaopIntegrationTest {
                     "Content-Type" to "application/octet-stream",
                     "Client-Instance" to clientInstance,
                     "DACP-ID" to clientInstance,
-                    "User-Agent" to "Lampan/0.1.0"
+                    "User-Agent" to "AirPlay/377.40.00"
                  )
                  val authSetupResponse = client.sendRequest("POST", "/auth-setup", authSetupHeaders, rawBody = authRequestBody)
                  println("AUTH-SETUP Response: ${authSetupResponse.code}")
+                 assertEquals(200, authSetupResponse.code)
                  
                  Thread.sleep(200)
                  
@@ -191,10 +223,11 @@ class RaopIntegrationTest {
                         "Content-Type" to "application/sdp",
                         "Client-Instance" to clientInstance,
                         "DACP-ID" to clientInstance,
-                        "User-Agent" to "Lampan/0.1.0"
+                        "User-Agent" to "AirPlay/377.40.00"
                      )
                      val announce = client.sendRequest("ANNOUNCE", "rtsp://$clientIp/$sessionId", announceHeaders, sdp)
                      println("ANNOUNCE Response: ${announce.code}")
+                     assertEquals(200, announce.code)
                      
                      Thread.sleep(200)
 
@@ -203,11 +236,12 @@ class RaopIntegrationTest {
                          val setupHeaders = mapOf(
                              "Client-Instance" to clientInstance,
                              "DACP-ID" to clientInstance,
-                             "User-Agent" to "Lampan/0.1.0",
+                             "User-Agent" to "AirPlay/377.40.00",
                              "Transport" to "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=${controlSocket.localPort};timing_port=${timingSocket.localPort}"
                          )
                          val setup = client.sendRequest("SETUP", "rtsp://$clientIp/$sessionId", setupHeaders)
                          println("SETUP Response: ${setup.code}")
+                         assertEquals(200, setup.code)
                          
                          val serverSession = setup.headers["Session"]
                          val serverTransport = setup.headers["Transport"]
@@ -244,13 +278,14 @@ class RaopIntegrationTest {
                              val recordHeaders = mapOf(
                                  "Client-Instance" to clientInstance,
                                  "DACP-ID" to clientInstance,
-                                 "User-Agent" to "Lampan/0.1.0",
+                                 "User-Agent" to "AirPlay/377.40.00",
                                  "Session" to serverSession,
                                  "Range" to "npt=0-",
                                  "RTP-Info" to "seq=0;rtptime=0"
                              )
                              val record = client.sendRequest("RECORD", "rtsp://$clientIp/$sessionId", recordHeaders)
                              println("RECORD Response: ${record.code}")
+                             assertEquals(200, record.code)
 
                              if (record.code == 200) {
                                  println("RECORD Successful.")
@@ -259,7 +294,7 @@ class RaopIntegrationTest {
                                  val paramHeaders = mapOf(
                                      "Client-Instance" to clientInstance,
                                      "DACP-ID" to clientInstance,
-                                     "User-Agent" to "Lampan/0.1.0",
+                                     "User-Agent" to "AirPlay/377.40.00",
                                      "Session" to serverSession,
                                      "Content-Type" to "text/parameters"
                                  )
