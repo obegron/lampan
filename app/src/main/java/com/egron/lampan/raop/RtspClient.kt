@@ -24,6 +24,29 @@ class RtspClient(private val host: String, private val port: Int, private val lo
         logCallback?.invoke(msg)
     }
 
+    fun hexDump(data: ByteArray): String {
+        val sb = StringBuilder()
+        for (i in data.indices step 16) {
+            val lineData = data.sliceArray(i until minOf(i + 16, data.size))
+            // Hex part
+            val hexStr = lineData.joinToString(" ") { "%02x".format(it) }
+            sb.append("%-48s".format(hexStr))
+            
+            // Ascii part
+            sb.append(" |")
+            lineData.forEach { b ->
+                val c = b.toInt().toChar()
+                if (c in ' '..'~') {
+                    sb.append(c)
+                } else {
+                    sb.append('.')
+                }
+            }
+            sb.append("|\n")
+        }
+        return sb.toString().trimEnd()
+    }
+
     fun connect() {
         log("Connecting to $host:$port...")
         socket = Socket(host, port)
@@ -64,9 +87,7 @@ class RtspClient(private val host: String, private val port: Int, private val lo
                 log(body)
             } else {
                 log("<Binary Body: ${contentBytes.size} bytes>")
-                // Log hex dump
-                val hex = contentBytes.joinToString("") { "%02x".format(it) }
-                log("Body Hex: $hex")
+                log(hexDump(contentBytes))
             }
         }
         log("-----------------------")
@@ -125,8 +146,7 @@ class RtspClient(private val host: String, private val port: Int, private val lo
                  log("Body: ${String(rawBodyBytes, StandardCharsets.UTF_8)}")
             } else {
                  log("<Binary Body: ${rawBodyBytes.size} bytes>")
-                 val hex = rawBodyBytes.joinToString("") { "%02x".format(it) }
-                 log("Body Hex: $hex")
+                 log(hexDump(rawBodyBytes))
             }
         }
         log("-------------------------")
@@ -176,4 +196,47 @@ class RtspClient(private val host: String, private val port: Int, private val lo
         // The first 32 bytes are the server's Curve25519 public key
         return responseBody.copyOfRange(0, 32)
     }
+}
+
+data class PairSetupResponse(
+    val serverEphemeralPublicKey: ByteArray,
+    val certificateChain: ByteArray,
+    val signature: ByteArray
+)
+
+// Inside RtspClient.kt
+fun parsePairSetupResponse(responseBody: ByteArray): PairSetupResponse {
+    if (responseBody.size < 36) { // 32 bytes key + 4 bytes length
+        throw IllegalArgumentException("Pair-setup response too short")
+    }
+
+    val serverEphemeralPublicKey = responseBody.copyOfRange(0, 32) // First 32 bytes
+    
+    // Read the 4-byte certificate chain length
+    val certificateChainLength = (responseBody[32].toUByte().toInt() shl 24) or
+                                 (responseBody[33].toUByte().toInt() shl 16) or
+                                 (responseBody[34].toUByte().toInt() shl 8) or
+                                  responseBody[35].toUByte().toInt()
+
+    val certEnd = 36 + certificateChainLength
+    if (responseBody.size < certEnd) {
+        throw IllegalArgumentException("Certificate chain length mismatch. Expected at least $certEnd, got ${responseBody.size}")
+    }
+
+    val certificateChain = responseBody.copyOfRange(36, certEnd)
+    
+    // Read signature length (4 bytes) if available
+    var signature = ByteArray(0)
+    if (responseBody.size >= certEnd + 4) {
+        val signatureLength = (responseBody[certEnd].toUByte().toInt() shl 24) or
+                              (responseBody[certEnd+1].toUByte().toInt() shl 16) or
+                              (responseBody[certEnd+2].toUByte().toInt() shl 8) or
+                               responseBody[certEnd+3].toUByte().toInt()
+        
+        if (responseBody.size >= certEnd + 4 + signatureLength) {
+            signature = responseBody.copyOfRange(certEnd + 4, certEnd + 4 + signatureLength)
+        }
+    }
+
+    return PairSetupResponse(serverEphemeralPublicKey, certificateChain, signature)
 }

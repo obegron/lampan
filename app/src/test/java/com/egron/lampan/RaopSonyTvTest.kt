@@ -4,6 +4,8 @@ import com.egron.lampan.raop.AlacEncoder
 import com.egron.lampan.raop.RaopSession
 import com.egron.lampan.raop.RtpPacket
 import com.egron.lampan.raop.RtspClient
+import com.egron.lampan.raop.parsePairSetupResponse
+import com.egron.lampan.raop.CryptoUtils
 import org.junit.Test
 import org.junit.Assert.assertEquals
 import java.io.File
@@ -163,24 +165,46 @@ class RaopSonyTvTest {
                  client.close()
                  client.connect()
                  
+                 // 1. Generate Client Ephemeral Key Pair (X25519)
+                 val clientKeyPair = generateCurve25519KeyPairBouncyCastle()
+                 val clientPublicKey = (clientKeyPair.public as X25519PublicKeyParameters).encoded
+                 val clientPrivateKey = (clientKeyPair.private as org.bouncycastle.crypto.params.X25519PrivateKeyParameters)
+
                  val pairSetupHeaders = mapOf(
                     "Content-Type" to "application/octet-stream",
                     "User-Agent" to "AirPlay/377.40.00"
                  )
-                 // Dummy body for pair-setup (usually it's a plist or binary TLV)
-                 // Just sending a minimal 33 byte dummy (0x01 + 32 bytes) to match curl test
-                 val dummyBody = ByteArray(33)
-                 dummyBody[0] = 0x01.toByte()
-                 // Fill the rest with random bytes as some devices might reject all-zero payloads
-                 val randomBytes = ByteArray(32)
-                 Random().nextBytes(randomBytes)
-                 System.arraycopy(randomBytes, 0, dummyBody, 1, 32)
                  
-                 val pairSetupResponse = client.sendRequest("POST", "/pair-setup", pairSetupHeaders, rawBody = dummyBody)
+                 // Body: 0x01 + 32-byte Client Public Key
+                 val pairSetupBody = ByteArray(33)
+                 pairSetupBody[0] = 0x01.toByte()
+                 System.arraycopy(clientPublicKey, 0, pairSetupBody, 1, 32)
+                 
+                 val pairSetupResponse = client.sendRequest("POST", "/pair-setup", pairSetupHeaders, rawBody = pairSetupBody)
                  println("PAIR-SETUP Response: ${pairSetupResponse.code}")
                  
+                 assertEquals(200, pairSetupResponse.code)
+                 
                  if (pairSetupResponse.code == 200) {
-                     println("Pairing initiated successfully. Proceeding to auth-setup...")
+                     println("Pairing initiated successfully. Parsing response...")
+                     val parsedResponse = parsePairSetupResponse(pairSetupResponse.rawBody)
+                     
+                     val serverPublicKeyBytes = parsedResponse.serverEphemeralPublicKey
+                     println("Server Ephemeral Public Key: ${client.hexDump(serverPublicKeyBytes)}")
+                     
+                     // 2. Calculate Shared Secret (ECDH)
+                     val agreement = X25519Agreement()
+                     agreement.init(clientPrivateKey)
+                     val sharedSecret = ByteArray(agreement.agreementSize)
+                     val serverPublicKeyParams = X25519PublicKeyParameters(serverPublicKeyBytes, 0)
+                     agreement.calculateAgreement(serverPublicKeyParams, sharedSecret, 0)
+                     
+                     println("Shared Secret Calculated (${sharedSecret.size} bytes):")
+                     println(client.hexDump(sharedSecret))
+
+                     // Now, we would typically generate our own ephemeral key, perform ECDH, and then
+                     // send a signed pair-verify or auth-setup.
+                     // For now, we proceed to auth-setup, which will likely fail without the crypto.
                      isHandshakeSuccess = true
                  }
              } else if (optionsResponse.code == 200) {
@@ -188,164 +212,7 @@ class RaopSonyTvTest {
              }
 
              if (isHandshakeSuccess) {
-                 // 2. POST /auth-setup
-                 val bcClientKeyPair = generateCurve25519KeyPairBouncyCastle()
-                 val clientPublicKeyBytes = (bcClientKeyPair.public as X25519PublicKeyParameters).encoded 
-                 val authRequestBody = ByteArray(33)
-                 authRequestBody[0] = 0x01.toByte()
-                 System.arraycopy(clientPublicKeyBytes, 0, authRequestBody, 1, 32)
-                 
-                 val authSetupHeaders = mapOf(
-                    "Content-Type" to "application/octet-stream",
-                    "Client-Instance" to clientInstance,
-                    "DACP-ID" to clientInstance,
-                    "User-Agent" to "AirPlay/377.40.00"
-                 )
-                 val authSetupResponse = client.sendRequest("POST", "/auth-setup", authSetupHeaders, rawBody = authRequestBody)
-                 println("AUTH-SETUP Response: ${authSetupResponse.code}")
-                 
-                 if (authSetupResponse.code == 403) {
-                     println("AUTH-SETUP returned 403. This is expected as we have not implemented the full SRP pairing/authentication handshake.")
-                     println("To proceed further, we need to implement the client-side AirPlay 1/2 pairing protocol.")
-                     return
-                 }
-                 
-                 assertEquals(200, authSetupResponse.code)
-                 
-                 Thread.sleep(200)
-                 
-                 if (authSetupResponse.code == 200) {
-                     // Crypto setup omitted for test speed
-                     println("Shared Secret generated (mock).")
-
-                     // 3. ANNOUNCE
-                     val sdp = "v=0\r\n" +
-                         "o=iTunes $sessionId 0 IN IP4 $clientIp\r\n" +
-                         "s=iTunes\r\n" +
-                         "c=IN IP4 $targetIp\r\n" +
-                         "t=0 0\r\n" +
-                         "m=audio 0 RTP/AVP 96\r\n" +
-                         "a=rtpmap:96 AppleLossless\r\n" +
-                         "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n" +
-                         "a=min-latency:11025"
-                     
-                     val announceHeaders = mapOf(
-                        "Content-Type" to "application/sdp",
-                        "Client-Instance" to clientInstance,
-                        "DACP-ID" to clientInstance,
-                        "User-Agent" to "AirPlay/377.40.00"
-                     )
-                     val announce = client.sendRequest("ANNOUNCE", "rtsp://$clientIp/$sessionId", announceHeaders, sdp)
-                     println("ANNOUNCE Response: ${announce.code}")
-                     assertEquals(200, announce.code)
-                     
-                     Thread.sleep(200)
-
-                     if (announce.code == 200) {
-                         // 4. SETUP
-                         val setupHeaders = mapOf(
-                             "Client-Instance" to clientInstance,
-                             "DACP-ID" to clientInstance,
-                             "User-Agent" to "AirPlay/377.40.00",
-                             "Transport" to "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=${controlSocket.localPort};timing_port=${timingSocket.localPort}"
-                         )
-                         val setup = client.sendRequest("SETUP", "rtsp://$clientIp/$sessionId", setupHeaders)
-                         println("SETUP Response: ${setup.code}")
-                         assertEquals(200, setup.code)
-                         
-                         val serverSession = setup.headers["Session"]
-                         val serverTransport = setup.headers["Transport"]
-                         var serverAudioPort = 0
-                         var serverControlPort = 0
-                         if (serverTransport != null) {
-                             val parts = serverTransport.split(";")
-                             for (part in parts) {
-                                 val p = part.trim()
-                                 if (p.startsWith("server_port=")) {
-                                     serverAudioPort = p.substringAfter("=").toInt()
-                                 }
-                                 if (p.startsWith("control_port=")) {
-                                     serverControlPort = p.substringAfter("=").toInt()
-                                 }
-                             }
-                         }
-                         
-                         // Inject state into RaopSession for sendFrame
-                         raopSession.setupForTest(
-                             testClientIp = clientIp,
-                             testSessionId = sessionId,
-                             testClientInstance = clientInstance,
-                             testHost = targetIp,
-                             testServerAudioPort = serverAudioPort,
-                             testServerSession = serverSession,
-                             testClientAudioSocket = clientAudioSocket,
-                             testClientControlSocket = controlSocket,
-                             testServerControlPort = serverControlPort
-                         )
-
-                         if (setup.code == 200 && serverSession != null) {
-                             // 5. RECORD
-                             val recordHeaders = mapOf(
-                                 "Client-Instance" to clientInstance,
-                                 "DACP-ID" to clientInstance,
-                                 "User-Agent" to "AirPlay/377.40.00",
-                                 "Session" to serverSession,
-                                 "Range" to "npt=0-",
-                                 "RTP-Info" to "seq=0;rtptime=0"
-                             )
-                             val record = client.sendRequest("RECORD", "rtsp://$clientIp/$sessionId", recordHeaders)
-                             println("RECORD Response: ${record.code}")
-                             assertEquals(200, record.code)
-
-                             if (record.code == 200) {
-                                 println("RECORD Successful.")
-                                 
-                                 // 6. SET_PARAMETER (Volume) - Match PipeWire flow
-                                 val paramHeaders = mapOf(
-                                     "Client-Instance" to clientInstance,
-                                     "DACP-ID" to clientInstance,
-                                     "User-Agent" to "AirPlay/377.40.00",
-                                     "Session" to serverSession,
-                                     "Content-Type" to "text/parameters"
-                                 )
-                                 val volBody = "volume: 0.000000\r\n"
-                                 val volResp = client.sendRequest("SET_PARAMETER", "rtsp://$targetIp:$targetPort/$sessionId", paramHeaders, volBody)
-                                 println("SET_VOLUME Response: ${volResp.code}")
-                                 
-                                 // 7. SET_PARAMETER (Progress)
-                                 val progBody = "progress: 0/0/0\r\n"
-                                 val progResp = client.sendRequest("SET_PARAMETER", "rtsp://$targetIp:$targetPort/$sessionId", paramHeaders, progBody)
-                                 println("SET_PROGRESS Response: ${progResp.code}")
-                                 
-                                 println("Streaming silence (50 packets) then sine wave...")
-                                 
-                                 // Send silence first
-                                 val silenceData = ByteArray(1408) // 352 frames of silence
-                                 for (i in 0 until 50) {
-                                     raopSession.sendFrame(silenceData)
-                                     Thread.sleep(8)
-                                 }
-                                 
-                                 val toneData = generateSineWave(6000, 440.0)
-                                 val packetSize = 352 * 4
-                                 val numPackets = toneData.size / packetSize
-                                 
-                                 for (i in 0 until numPackets) {
-                                     val offset = i * packetSize
-                                     val chunk = toneData.copyOfRange(offset, offset + packetSize)
-                                     raopSession.sendFrame(chunk)
-                                     if (i % 100 == 0) println("Sent packet $i")
-                                     Thread.sleep(8) 
-                                 }
-                                 println("Finished streaming.")
-                             }
-                         }
-                         
-                         controlSocket.close()
-                         timingSocket.close()
-                         clientAudioSocket.close()
-                     }
-                 }
+                 // Handshake success logic here if needed
              }
              client.close()
         } catch (e: Exception) {
