@@ -1,7 +1,9 @@
 package com.egron.lampan.raop
 
 import android.util.Log
+import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSDictionary
+import com.dd.plist.NSData
 import com.dd.plist.PropertyListParser
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -195,6 +197,15 @@ class RtspClient(private val host: String, private val port: Int, private val lo
         }
         // The first 32 bytes are the server's Curve25519 public key
         return responseBody.copyOfRange(0, 32)
+    }
+
+    fun createSrpStartRequest(user: String, pk: ByteArray): ByteArray {
+        val root = NSDictionary()
+        root.put("method", "pin")
+        root.put("user", user)
+        root.put("pk", NSData(pk))
+        root.put("flags", 0L)
+        return BinaryPropertyListWriter.writeToArray(root)
     }
 }
 
