@@ -207,6 +207,14 @@ class RtspClient(private val host: String, private val port: Int, private val lo
         root.put("flags", 0L)
         return BinaryPropertyListWriter.writeToArray(root)
     }
+
+    fun createAuthSetupRequest(sessionKey: ByteArray, payload: ByteArray): ByteArray {
+        // Auth-Setup usually involves sending an encrypted payload using the session key.
+        // The IV is typically 16 bytes (all zeros or random). Standard AirPlay often uses 0 or nonce.
+        // We will use an empty 16-byte IV for this helper, but it can be parameterized if needed.
+        val iv = ByteArray(16) 
+        return com.egron.lampan.raop.CryptoUtils.aesGcmEncrypt(sessionKey, iv, payload)
+    }
 }
 
 data class PairSetupResponse(
