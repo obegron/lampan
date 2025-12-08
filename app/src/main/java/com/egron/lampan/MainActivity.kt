@@ -52,7 +52,14 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
+import com.egron.lampan.raop.AirPlayDevice
+import com.egron.lampan.raop.AirPlayDiscovery
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,6 +77,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen() {
     val context = LocalContext.current
@@ -82,6 +90,12 @@ fun MainScreen() {
     // Use a list for logs
     var statusLogs by remember { mutableStateOf(listOf("Ready.")) }
     val listState = rememberLazyListState()
+
+    // Discovery State
+    var isScanning by remember { mutableStateOf(false) }
+    var discoveredDevices by remember { mutableStateOf(emptyList<AirPlayDevice>()) }
+    var expanded by remember { mutableStateOf(false) }
+    val discovery = remember { AirPlayDiscovery(context) }
 
     // Listen for errors and status from Service
     DisposableEffect(context) {
@@ -134,6 +148,17 @@ fun MainScreen() {
         listState.animateScrollToItem(statusLogs.size - 1)
     }
 
+    LaunchedEffect(isScanning) {
+        if (isScanning) {
+            discovery.discoverDevices().collect {
+                discoveredDevices = it
+                if (it.isNotEmpty()) {
+                    expanded = true
+                }
+            }
+        }
+    }
+
     // MediaProjection Launcher
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -160,6 +185,16 @@ fun MainScreen() {
         }
     }
 
+    val scanPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            isScanning = true
+        } else {
+            Toast.makeText(context, "Nearby Devices permission required", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -172,12 +207,26 @@ fun MainScreen() {
         )
         
         // Scrollable Log Box
+        Text(
+            text = "Logs (Tap to Copy)",
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("Lampan Logs", statusLogs.joinToString("\n"))
+                    clipboard.setPrimaryClip(clip)
+                    Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                }
+                .padding(top = 8.dp, bottom = 4.dp)
+        )
+        
         SelectionContainer {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(200.dp) // Fixed height for logs
+                    .height(150.dp) // Reduced height slightly
                     .padding(vertical = 8.dp)
             ) {
                 items(statusLogs) { log ->
@@ -189,35 +238,71 @@ fun MainScreen() {
             }
         }
         
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Discovery UI
         Button(
             onClick = {
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("Lampan Logs", statusLogs.joinToString("\n"))
-                clipboard.setPrimaryClip(clip)
-                Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                if (isScanning) {
+                    isScanning = false
+                } else {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        scanPermissionLauncher.launch(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+                    } else {
+                        isScanning = true
+                    }
+                }
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Copy Logs")
+            Text(if (isScanning) "Stop Scanning" else "Scan for AirPlay Devices")
         }
-        
-        Spacer(modifier = Modifier.height(16.dp))
 
-        OutlinedTextField(
-            value = ipAddress,
-            onValueChange = { ipAddress = it },
-            label = { Text("Receiver IP Address") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Number,
-                imeAction = ImeAction.Done
-            ),
-            keyboardActions = KeyboardActions(
-                onDone = { focusManager.clearFocus() }
-            ),
-            enabled = !isConnected
-        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            OutlinedTextField(
+                value = ipAddress,
+                onValueChange = { ipAddress = it },
+                label = { Text("Receiver IP Address") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(),
+                singleLine = true,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(
+                    onDone = { focusManager.clearFocus() }
+                ),
+                enabled = !isConnected
+            )
+            
+            if (discoveredDevices.isNotEmpty()) {
+                ExposedDropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false }
+                ) {
+                    discoveredDevices.forEach { device ->
+                        DropdownMenuItem(
+                            text = { Text("${device.name} (${device.ip}:${device.port})") },
+                            onClick = {
+                                ipAddress = device.ip
+                                expanded = false
+                                isScanning = false // Stop scanning on select
+                            }
+                        )
+                    }
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -246,18 +331,6 @@ fun MainScreen() {
                 Text("Disconnect")
             }
             
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            Button(
-                onClick = {
-                    val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
-                    toneGen.startTone(ToneGenerator.TONE_CDMA_PIP, 500) // Play for 500ms
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Play Test Sound")
-            }
-            
             Spacer(modifier = Modifier.height(24.dp))
             
             Text("Volume")
@@ -265,10 +338,6 @@ fun MainScreen() {
                 value = volume,
                 onValueChange = { 
                     volume = it
-                    // Send volume update (debouncing might be good in real app, but direct is fine for now)
-                    // We need a way to communicate this to the service.
-                    // Currently MainActivity has no reference to the Service/Session.
-                    // We need to send an Intent to the Service to update volume.
                     val intent = Intent(context, AudioCaptureService::class.java).apply {
                         action = "SET_VOLUME"
                         putExtra("VOLUME", it)
@@ -277,6 +346,19 @@ fun MainScreen() {
                 },
                 valueRange = 0f..1f
             )
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // Always visible test sound button
+        Button(
+            onClick = {
+                val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+                toneGen.startTone(ToneGenerator.TONE_CDMA_PIP, 500) // Play for 500ms
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Play Test Sound (Local)")
         }
     }
 }
