@@ -53,7 +53,12 @@ import androidx.core.content.ContextCompat
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.clickable
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -77,12 +82,40 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Helper to get current WiFi SSID
+private fun getCurrentSsid(context: Context): String {
+    val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    val info = wifiManager.connectionInfo
+    // info.ssid returns with quotes, e.g. "MyNetwork", or <unknown ssid>
+    return info.ssid.replace("\"", "")
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen() {
     val context = LocalContext.current
+    val prefsManager = remember { PreferencesManager(context) }
+    val currentSsid = remember { getCurrentSsid(context) }
+    
+    // Initialize IP from prefs based on SSID, or fallback to last used, or empty
+    var ipAddress by remember { 
+        mutableStateOf(
+            prefsManager.getIpForSsid(currentSsid).ifEmpty { 
+                prefsManager.getLastUsedIp() 
+            }
+        ) 
+    }
+    
+    // Function to update IP and save to prefs
+    val updateIpAddress = { newIp: String ->
+        ipAddress = newIp
+        if (currentSsid.isNotEmpty() && currentSsid != "<unknown ssid>") {
+            prefsManager.saveIpForSsid(currentSsid, newIp)
+        }
+        prefsManager.saveLastUsedIp(newIp)
+    }
+
     val focusManager = LocalFocusManager.current
-    var ipAddress by remember { mutableStateOf("192.168.0.21") }
     var isConnected by remember { mutableStateOf(false) }
     var volume by remember { mutableStateOf(1.0f) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -265,13 +298,12 @@ fun MainScreen() {
             onExpandedChange = { expanded = !expanded },
             modifier = Modifier.fillMaxWidth()
         ) {
-            OutlinedTextField(
-                value = ipAddress,
-                onValueChange = { ipAddress = it },
-                label = { Text("Receiver IP Address") },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .menuAnchor(),
+                    OutlinedTextField(
+                        value = ipAddress,
+                        onValueChange = { updateIpAddress(it) },
+                        label = { Text("Receiver IP Address") },
+                        modifier = Modifier
+                            .fillMaxWidth()                    .menuAnchor(),
                 singleLine = true,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                 colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
@@ -294,7 +326,7 @@ fun MainScreen() {
                         DropdownMenuItem(
                             text = { Text("${device.name} (${device.ip}:${device.port})") },
                             onClick = {
-                                ipAddress = device.ip
+                                updateIpAddress(device.ip)
                                 expanded = false
                                 isScanning = false // Stop scanning on select
                             }
