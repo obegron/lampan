@@ -32,7 +32,7 @@ jobs:
       # involving secrets for the keystore and passwords.
 
       - name: Rename APK
-        run: mv app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/lampan-${{ github.ref_name }}.apk
+        run: mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/lampan-${{ github.ref_name }}.apk
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
