@@ -32,9 +32,12 @@ jobs:
       # To sign the APK for production, you would typically use a signing step here
       # involving secrets for the keystore and passwords.
 
+      - name: Rename APK
+        run: mv app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/lampan-${{ github.ref_name }}.apk
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: app/build/outputs/apk/release/*.apk
+          files: app/build/outputs/apk/release/lampan-${{ github.ref_name }}.apk
           generate_release_notes: true
