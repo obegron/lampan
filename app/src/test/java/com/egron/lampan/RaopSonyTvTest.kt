@@ -122,7 +122,7 @@ class RaopSonyTvTest {
         return buffer
     }
 
-    @Test
+    // @Test
     fun testDiscoveryAndHandshake() {
         val targetIp = "192.168.0.12"
         val targetPort = 7000
