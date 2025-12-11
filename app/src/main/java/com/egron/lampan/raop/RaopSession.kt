@@ -74,7 +74,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         }
     }
 
-    suspend fun connect() {
+    suspend fun connect(initialVolume: Float = 1.0f) {
         client.connect()
         
         if (sessionId == null) { 
@@ -239,10 +239,10 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         sendSyncPacket(true)
         firstSyncSent = true
         
-        // Set initial volume to max (0dB)
+        // Set initial volume
         delay(100)
-        setVolume(1.0f)
-        log("Initial volume set to 1.0")
+        setVolume(initialVolume)
+        log("Initial volume set to $initialVolume")
     }
 
     private fun startUdpListener(socket: DatagramSocket, name: String) {

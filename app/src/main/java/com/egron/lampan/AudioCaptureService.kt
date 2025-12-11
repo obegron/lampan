@@ -37,10 +37,11 @@ class AudioCaptureService : Service() {
                 }
                 val host = intent.getStringExtra("HOST") ?: "192.168.1.1"
                 val port = intent.getIntExtra("PORT", 7000)
+                val initialVolume = intent.getFloatExtra("INITIAL_VOLUME", 1.0f)
                 
                 if (resultCode != 0 && data != null) {
                     startForegroundService()
-                    startCapture(resultCode, data, host, port)
+                    startCapture(resultCode, data, host, port, initialVolume)
                 }
             }
             "STOP" -> {
@@ -79,7 +80,7 @@ class AudioCaptureService : Service() {
         }
     }
 
-    private fun startCapture(resultCode: Int, data: Intent, host: String, port: Int) {
+    private fun startCapture(resultCode: Int, data: Intent, host: String, port: Int, initialVolume: Float) {
         try {
             val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val mediaProjection = mpManager.getMediaProjection(resultCode, data) ?: throw Exception("MediaProjection denied or null")
@@ -99,7 +100,7 @@ class AudioCaptureService : Service() {
             
             scope.launch {
                 try {
-                    raopSession?.connect()
+                    raopSession?.connect(initialVolume)
                     sendStatusBroadcast("Connected. Starting capture...")
                     audioCapture?.start()
                 } catch (e: Exception) {

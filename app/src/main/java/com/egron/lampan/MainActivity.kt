@@ -197,7 +197,7 @@ fun MainScreen() {
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            startService(context, result.resultCode, result.data!!, ipAddress)
+            startService(context, result.resultCode, result.data!!, ipAddress, volume)
             isConnected = true
         } else {
             Toast.makeText(context, "MediaProjection denied", Toast.LENGTH_SHORT).show()
@@ -395,7 +395,7 @@ fun MainScreen() {
     }
 }
 
-fun startService(context: Context, resultCode: Int, data: Intent, rawIp: String) {
+fun startService(context: Context, resultCode: Int, data: Intent, rawIp: String, volume: Float) {
     val (host, port) = parseIpAndPort(rawIp)
     val intent = Intent(context, AudioCaptureService::class.java).apply {
         action = "START"
@@ -403,6 +403,7 @@ fun startService(context: Context, resultCode: Int, data: Intent, rawIp: String)
         putExtra("DATA", data)
         putExtra("HOST", host)
         putExtra("PORT", port)
+        putExtra("INITIAL_VOLUME", volume)
     }
     ContextCompat.startForegroundService(context, intent)
 }
