@@ -58,7 +58,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     }
 
     // New method for integration tests to set internal state directly
-    fun setupForTest(testClientIp: String, testSessionId: String, testClientInstance: String, testHost: String, testServerAudioPort: Int, testServerSession: String?, testClientAudioSocket: DatagramSocket?, testClientControlSocket: DatagramSocket?, testServerControlPort: Int) {
+    fun setupForTest(testSessionId: String, testClientInstance: String, testHost: String, testServerAudioPort: Int, testServerSession: String?, testClientAudioSocket: DatagramSocket?, testClientControlSocket: DatagramSocket?, testServerControlPort: Int) {
         this.host = testHost 
         this.sessionId = testSessionId
         this.clientInstance = testClientInstance
@@ -255,7 +255,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
                     packet.length = buffer.size // Reset length
                     socket.receive(packet)
                     val len = packet.length
-                    val hex = buffer.take(minOf(len, 16)).joinToString("") { "%02x".format(it) }
+
                     // log("UDP $name received $len bytes from ${packet.address}:${packet.port}: $hex...")
                     
                     if (name == "Timing" && len >= 32 && buffer[0] == 0x80.toByte() && buffer[1] == 0xD2.toByte()) {

@@ -228,7 +228,6 @@ class RaopIntegrationTest {
                          
                          // Inject state into RaopSession for sendFrame
                          raopSession.setupForTest(
-                             testClientIp = clientIp,
                              testSessionId = sessionId,
                              testClientInstance = clientInstance,
                              testHost = targetIp,
