@@ -62,7 +62,7 @@ dependencies {
     implementation("com.googlecode.plist:dd-plist:1.23")
     
     testImplementation(libs.junit)
-    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.10.0")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:6.0.2")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
