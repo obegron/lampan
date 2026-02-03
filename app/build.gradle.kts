@@ -81,4 +81,3 @@ tasks.withType<Test>().configureEach {
         events("passed", "skipped", "failed")
     }
 }
-

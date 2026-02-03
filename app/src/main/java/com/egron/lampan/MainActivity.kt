@@ -10,27 +10,44 @@ import android.content.IntentFilter
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.core.content.ContextCompat
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -42,40 +59,40 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.clickable
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
-import android.net.wifi.WifiManager
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.rememberCoroutineScope
-import kotlinx.coroutines.launch
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.ui.res.painterResource
 import com.egron.lampan.raop.AirPlayDevice
 import com.egron.lampan.raop.AirPlayDiscovery
+import com.egron.lampan.ui.theme.LampanTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            var isDarkTheme by rememberSaveable { mutableStateOf(true) }
+            LampanTheme(darkTheme = isDarkTheme) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainScreen()
+                    MainScreen(
+                        isDarkTheme = isDarkTheme,
+                        onToggleTheme = { isDarkTheme = !isDarkTheme }
+                    )
                 }
             }
         }
@@ -84,28 +101,44 @@ class MainActivity : ComponentActivity() {
 
 // Helper to get current WiFi SSID
 private fun getCurrentSsid(context: Context): String {
-    val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
-    val info = wifiManager.connectionInfo
-    // info.ssid returns with quotes, e.g. "MyNetwork", or <unknown ssid>
-    return info.ssid.replace("\"", "")
+    val rawSsid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val connectivityManager =
+            context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = connectivityManager.activeNetwork
+        val capabilities = connectivityManager.getNetworkCapabilities(network)
+        val transportInfo = capabilities?.transportInfo
+        if (transportInfo is WifiInfo) {
+            transportInfo.ssid
+        } else {
+            "<unknown ssid>"
+        }
+    } else {
+        val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val info = wifiManager.connectionInfo
+        info.ssid
+    }
+    // ssid returns with quotes, e.g. "MyNetwork", or <unknown ssid>
+    return rawSsid.replace("\"", "")
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen() {
+fun MainScreen(
+    isDarkTheme: Boolean,
+    onToggleTheme: () -> Unit
+) {
     val context = LocalContext.current
     val prefsManager = remember { PreferencesManager(context) }
     val currentSsid = remember { getCurrentSsid(context) }
-    
+
     // Initialize IP from prefs based on SSID, or fallback to last used, or empty
-    var ipAddress by remember { 
+    var ipAddress by remember {
         mutableStateOf(
-            prefsManager.getIpForSsid(currentSsid).ifEmpty { 
-                prefsManager.getLastUsedIp() 
+            prefsManager.getIpForSsid(currentSsid).ifEmpty {
+                prefsManager.getLastUsedIp()
             }
-        ) 
+        )
     }
-    
+
     // Function to update IP and save to prefs
     val updateIpAddress = { newIp: String ->
         ipAddress = newIp
@@ -119,7 +152,7 @@ fun MainScreen() {
     var isConnected by remember { mutableStateOf(false) }
     var volume by remember { mutableStateOf(1.0f) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    
+
     // Use a list for logs
     var statusLogs by remember { mutableStateOf(listOf("Ready.")) }
     val listState = rememberLazyListState()
@@ -127,7 +160,6 @@ fun MainScreen() {
     // Discovery State
     var isScanning by remember { mutableStateOf(false) }
     var discoveredDevices by remember { mutableStateOf(emptyList<AirPlayDevice>()) }
-    var expanded by remember { mutableStateOf(false) }
     val discovery = remember { AirPlayDiscovery(context) }
 
     // Listen for errors and status from Service
@@ -153,12 +185,17 @@ fun MainScreen() {
             addAction("com.egron.lampan.ERROR")
             addAction("com.egron.lampan.STATUS")
         }
-        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         onDispose {
             context.unregisterReceiver(receiver)
         }
     }
-    
+
     if (errorMessage != null) {
         AlertDialog(
             onDismissRequest = { errorMessage = null },
@@ -171,7 +208,7 @@ fun MainScreen() {
             }
         )
     }
-    
+
     // Auto-scroll to bottom
     LaunchedEffect(statusLogs.size) {
         listState.animateScrollToItem(statusLogs.size - 1)
@@ -181,9 +218,6 @@ fun MainScreen() {
         if (isScanning) {
             discovery.discoverDevices().collect {
                 discoveredDevices = it
-                if (it.isNotEmpty()) {
-                    expanded = true
-                }
             }
         }
     }
@@ -224,169 +258,352 @@ fun MainScreen() {
         }
     }
 
-    Column(
+    val backgroundBrush = Brush.linearGradient(
+        colors = listOf(
+            MaterialTheme.colorScheme.background,
+            MaterialTheme.colorScheme.background.copy(alpha = 0.92f),
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+        )
+    )
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(backgroundBrush)
+            .padding(16.dp)
     ) {
-        Text(
-            text = "Lampan - AirPlay",
-            style = MaterialTheme.typography.headlineMedium
-        )
-        
-        // Scrollable Log Box
-        Text(
-            text = "Logs (Tap to Copy)",
-            style = MaterialTheme.typography.labelMedium,
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .clickable {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clip = ClipData.newPlainText("Lampan Logs", statusLogs.joinToString("\n"))
-                    clipboard.setPrimaryClip(clip)
-                    Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            HeaderCard(
+                title = "Lampan",
+                subtitle = "AirPlay audio streaming",
+                isConnected = isConnected,
+                currentSsid = currentSsid,
+                isDarkTheme = isDarkTheme,
+                onToggleTheme = onToggleTheme
+            )
+
+            SectionCard(title = "Receiver") {
+                Text(
+                    text = "Pick a device or enter an IP manually.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = ipAddress,
+                    onValueChange = { updateIpAddress(it) },
+                    label = { Text("Receiver IP Address") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = { focusManager.clearFocus() }
+                    ),
+                    enabled = !isConnected
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (isScanning) {
+                                isScanning = false
+                            } else {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    scanPermissionLauncher.launch(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+                                } else {
+                                    isScanning = true
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(if (isScanning) "Stop Scan" else "Scan")
+                    }
+
+                    Button(
+                        onClick = {
+                            // Request Permissions first
+                            val perms = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                perms.add(android.Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            permissionsLauncher.launch(perms.toTypedArray())
+                        },
+                        modifier = Modifier.weight(1f),
+                        enabled = !isConnected
+                    ) {
+                        Text("Connect")
+                    }
                 }
-                .padding(top = 8.dp, bottom = 4.dp)
-        )
-        
-        SelectionContainer {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(150.dp) // Reduced height slightly
-                    .padding(vertical = 8.dp)
-            ) {
-                items(statusLogs) { log ->
+
+                if (isConnected) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            stopService(context)
+                            isConnected = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary
+                        )
+                    ) {
+                        Text("Disconnect")
+                    }
+                }
+
+                if (discoveredDevices.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = log,
-                        style = MaterialTheme.typography.bodySmall
+                        text = "Discovered Devices",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 180.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(discoveredDevices) { device ->
+                            DeviceRow(device = device) {
+                                updateIpAddress(device.ip)
+                                isScanning = false
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (isConnected) {
+                SectionCard(title = "Streaming") {
+                    Text("Volume", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Slider(
+                        value = volume,
+                        onValueChange = {
+                            volume = it
+                            val intent = Intent(context, AudioCaptureService::class.java).apply {
+                                action = "SET_VOLUME"
+                                putExtra("VOLUME", it)
+                            }
+                            context.startService(intent)
+                        },
+                        valueRange = 0f..1f
                     )
                 }
             }
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
 
-        // Discovery UI
-        Button(
-            onClick = {
-                if (isScanning) {
-                    isScanning = false
-                } else {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        scanPermissionLauncher.launch(android.Manifest.permission.NEARBY_WIFI_DEVICES)
-                    } else {
-                        isScanning = true
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(if (isScanning) "Stop Scanning" else "Scan for AirPlay Devices")
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { expanded = !expanded },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-                    OutlinedTextField(
-                        value = ipAddress,
-                        onValueChange = { updateIpAddress(it) },
-                        label = { Text("Receiver IP Address") },
-                        modifier = Modifier
-                            .fillMaxWidth()                    .menuAnchor(),
-                singleLine = true,
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Number,
-                    imeAction = ImeAction.Done
-                ),
-                keyboardActions = KeyboardActions(
-                    onDone = { focusManager.clearFocus() }
-                ),
-                enabled = !isConnected
-            )
-            
-            if (discoveredDevices.isNotEmpty()) {
-                ExposedDropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false }
+            SectionCard(title = "Logs") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    discoveredDevices.forEach { device ->
-                        DropdownMenuItem(
-                            text = { Text("${device.name} (${device.ip}:${device.port})") },
-                            onClick = {
-                                updateIpAddress(device.ip)
-                                expanded = false
-                                isScanning = false // Stop scanning on select
-                            }
-                        )
+                    Text(
+                        text = "Session output",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    TextButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("Lampan Logs", statusLogs.joinToString("\n"))
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Text("Copy")
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                SelectionContainer {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                    ) {
+                        items(statusLogs) { log ->
+                            Text(
+                                text = log,
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            )
+                        }
                     }
                 }
             }
+
+            SectionCard(title = "Utilities") {
+                Text(
+                    text = "Quick audio ping to confirm local output is working.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+                        toneGen.startTone(ToneGenerator.TONE_CDMA_PIP, 500)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Play Test Sound (Local)")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeaderCard(
+    title: String,
+    subtitle: String,
+    isConnected: Boolean,
+    currentSsid: String,
+    isDarkTheme: Boolean,
+    onToggleTheme: () -> Unit
+) {
+    SectionCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = title, style = MaterialTheme.typography.headlineLarge)
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                IconButton(onClick = onToggleTheme) {
+                    Icon(
+                        painter = painterResource(
+                            id = if (isDarkTheme) R.drawable.ic_theme_sun else R.drawable.ic_theme_moon
+                        ),
+                        contentDescription = if (isDarkTheme) "Switch to light theme" else "Switch to dark theme"
+                    )
+                }
+                StatusPill(isConnected = isConnected)
+            }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (!isConnected) {
-            Button(
-                onClick = {
-                    // Request Permissions first
-                    val perms = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        perms.add(android.Manifest.permission.POST_NOTIFICATIONS)
-                    }
-                    permissionsLauncher.launch(perms.toTypedArray())
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Connect & Stream")
-            }
-        } else {
-            Button(
-                onClick = {
-                    stopService(context)
-                    isConnected = false
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Disconnect")
-            }
-            
-            Spacer(modifier = Modifier.height(24.dp))
-            
-            Text("Volume")
-            Slider(
-                value = volume,
-                onValueChange = { 
-                    volume = it
-                    val intent = Intent(context, AudioCaptureService::class.java).apply {
-                        action = "SET_VOLUME"
-                        putExtra("VOLUME", it)
-                    }
-                    context.startService(intent)
-                },
-                valueRange = 0f..1f
+        Spacer(modifier = Modifier.height(12.dp))
+        if (currentSsid.isNotEmpty() && currentSsid != "<unknown ssid>") {
+            Text(
+                text = "Wi-Fi: $currentSsid",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        // Always visible test sound button
-        Button(
-            onClick = {
-                val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
-                toneGen.startTone(ToneGenerator.TONE_CDMA_PIP, 500) // Play for 500ms
-            },
-            modifier = Modifier.fillMaxWidth()
+    }
+}
+
+@Composable
+private fun StatusPill(isConnected: Boolean) {
+    val color = if (isConnected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+    val textColor = if (isConnected) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Surface(
+        color = color,
+        shape = MaterialTheme.shapes.small
+    ) {
+        Text(
+            text = if (isConnected) "Connected" else "Idle",
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = textColor
+        )
+    }
+}
+
+@Composable
+private fun SectionCard(
+    title: String? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        tonalElevation = 2.dp,
+        shadowElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            content = {
+                if (title != null) {
+                    Text(text = title, style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+                content()
+            }
+        )
+    }
+}
+
+@Composable
+private fun DeviceRow(device: AirPlayDevice, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Play Test Sound (Local)")
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = device.name, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = "${device.ip}:${device.port}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        MaterialTheme.colorScheme.primary,
+                        shape = MaterialTheme.shapes.small
+                    )
+            )
         }
     }
 }
