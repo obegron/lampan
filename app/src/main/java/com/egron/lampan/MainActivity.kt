@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.media.projection.MediaProjectionManager
@@ -119,6 +120,18 @@ private fun getCurrentSsid(context: Context): String {
     }
     // ssid returns with quotes, e.g. "MyNetwork", or <unknown ssid>
     return rawSsid.replace("\"", "")
+}
+
+private fun hasPermission(context: Context, permission: String): Boolean {
+    return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+}
+
+private fun requestMediaProjection(
+    context: Context,
+    launcher: androidx.activity.result.ActivityResultLauncher<Intent>
+) {
+    val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    launcher.launch(mgr.createScreenCaptureIntent())
 }
 
 @Composable
@@ -238,13 +251,16 @@ fun MainScreen(
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] ?: false
+        val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO]
+            ?: hasPermission(context, android.Manifest.permission.RECORD_AUDIO)
         if (audioGranted) {
-            // Request MediaProjection
-            val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            launcher.launch(mgr.createScreenCaptureIntent())
+            requestMediaProjection(context, launcher)
         } else {
-            Toast.makeText(context, "Audio Permission required", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                context,
+                "Playback capture permission is required by Android",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 
@@ -336,12 +352,20 @@ fun MainScreen(
 
                     Button(
                         onClick = {
-                            // Request Permissions first
-                            val perms = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                perms.add(android.Manifest.permission.POST_NOTIFICATIONS)
+                            val perms = mutableListOf<String>()
+                            if (!hasPermission(context, android.Manifest.permission.RECORD_AUDIO)) {
+                                perms.add(android.Manifest.permission.RECORD_AUDIO)
                             }
-                            permissionsLauncher.launch(perms.toTypedArray())
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                if (!hasPermission(context, android.Manifest.permission.POST_NOTIFICATIONS)) {
+                                    perms.add(android.Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            }
+                            if (perms.isEmpty()) {
+                                requestMediaProjection(context, launcher)
+                            } else {
+                                permissionsLauncher.launch(perms.toTypedArray())
+                            }
                         },
                         modifier = Modifier.weight(1f),
                         enabled = !isConnected

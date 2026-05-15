@@ -6,13 +6,14 @@ import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.nio.ByteBuffer
 
 class AudioCapture(
     private val mediaProjection: MediaProjection,
@@ -21,9 +22,10 @@ class AudioCapture(
 ) {
     private var audioRecord: AudioRecord? = null
     private var captureJob: Job? = null
+    private var mediaProjectionCallback: MediaProjection.Callback? = null
+    private val callbackHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO)
     private val bufferSize: Int
-    private val isRecording = false
 
     init {
         // Standard AirPlay format: 44100Hz, Stereo, 16-bit
@@ -40,6 +42,15 @@ class AudioCapture(
 
         try {
             onStatus("AudioCapture: Configuring...")
+            val callback = object : MediaProjection.Callback() {
+                override fun onStop() {
+                    onStatus("AudioCapture: MediaProjection stopped")
+                    stopAudioRecord()
+                }
+            }
+            mediaProjection.registerCallback(callback, callbackHandler)
+            mediaProjectionCallback = callback
+
             val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                 .addMatchingUsage(AudioAttributes.USAGE_GAME)
@@ -99,20 +110,54 @@ class AudioCapture(
             }
         } catch (e: Exception) {
             Log.e("AudioCapture", "Error starting capture", e)
+            stopAudioRecord()
+            unregisterMediaProjectionCallback()
             onStatus("AudioCapture Failed: ${e.message}")
             throw e
         }
     }
 
     fun stop() {
+        stopAudioRecord()
+        unregisterMediaProjectionCallback()
         try {
-            captureJob?.cancel()
-            audioRecord?.stop()
-            audioRecord?.release()
-            audioRecord = null
+            mediaProjection.stop()
+        } catch (e: Exception) {
+            Log.e("AudioCapture", "Error stopping MediaProjection", e)
+        }
+    }
+
+    private fun stopAudioRecord() {
+        captureJob?.cancel()
+        captureJob = null
+
+        val record = audioRecord ?: return
+        audioRecord = null
+
+        if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+            try {
+                record.stop()
+            } catch (e: Exception) {
+                Log.e("AudioCapture", "Error stopping AudioRecord", e)
+            }
+        }
+
+        try {
+            record.release()
             Log.d("AudioCapture", "Stopped recording")
         } catch (e: Exception) {
-            Log.e("AudioCapture", "Error stopping", e)
+            Log.e("AudioCapture", "Error releasing AudioRecord", e)
+        }
+    }
+
+    private fun unregisterMediaProjectionCallback() {
+        val callback = mediaProjectionCallback ?: return
+        try {
+            mediaProjection.unregisterCallback(callback)
+        } catch (e: Exception) {
+            Log.e("AudioCapture", "Error unregistering MediaProjection callback", e)
+        } finally {
+            mediaProjectionCallback = null
         }
     }
 }
