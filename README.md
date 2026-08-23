@@ -1,64 +1,115 @@
-# Lampan - AirPlay Audio Streamer for Android
+<div align="center">
 
-Lampan is a lightweight Android application that streams your device's system audio directly to AirPlay receivers. It supports AirPlay 1 speakers such as **IKEA Symfonisk** (Sonos), plus native encrypted AirPlay 2 audio for compatible receivers.
+# Lampan
 
-## Motivation
+### Stream Android audio directly to AirPlay speakers and TVs
 
-I bought an IKEA Symfonisk speaker and was disappointed to discover it was largely locked to the Sonos ecosystem (Sonos Radio, Spotify Connect, etc.). I couldn't simply use it as a general-purpose speaker for YouTube, browser audio, or other apps on my Android phone.
+No accounts, ads, subscriptions, or cloud relay—just your phone, your receiver,
+and your local network.
 
-Lampan solves this by capturing internal audio and streaming it via the AirPlay protocol, giving you the freedom to use your speaker with *any* app.
+[![Latest release](https://img.shields.io/github/v/release/obegron/lampan?style=flat-square&label=latest)](https://github.com/obegron/lampan/releases/latest)
+![Android 10+](https://img.shields.io/badge/Android-10%2B-3DDC84?style=flat-square&logo=android&logoColor=white)
+[![MIT license](https://img.shields.io/github/license/obegron/lampan?style=flat-square)](LICENSE)
 
-## Features
+<img src="docs/images/lampan-main.png" alt="Lampan receiver and streaming screen" width="360">
 
-*   **System-Wide Audio Capture:** Streams audio from any app on your phone (requires Android 10+).
-*   **AirPlay 1 Support:** Compatible with older AirPlay devices and Sonos/Symfonisk speakers.
-*   **Native AirPlay 2 Audio:** Pair with password-protected receivers, automatically try standard passwordless transient setup, securely remember successfully authenticated passwords or pairing credentials, and stream encrypted realtime ALAC audio.
-*   **Device Discovery:** Scans both AirPlay 1 and AirPlay 2 services, merges records belonging to the same receiver, and uses AirPlay 1 by default when both are available. The per-device choice can be changed to AirPlay 2 and is remembered.
-*   **Known Receivers:** Remembers multiple receiver capabilities and verifies saved addresses with a quiet AirPlay `GET /info` identity check.
-*   **Synchronized Receiver Groups (Experimental):** Select multiple known receivers—including a mix of AirPlay 1 and AirPlay 2—to share one capture stream and RTP/NTP start timeline.
-*   **Volume Control:** Adjust the speaker volume directly from the app.
-*   **Background Service:** Keeps streaming even when you switch apps or lock the screen.
+</div>
 
-## Installation
+Lampan captures playback audio from Android apps and streams it to AirPlay
+receivers. It was built to make an **IKEA Symfonisk** useful as a general-purpose
+speaker, and now supports AirPlay 1 speakers plus native encrypted AirPlay 2 on
+compatible receivers such as Sony Bravia TVs.
 
-Install the APK from the GitHub release on your Android device. Release APKs use the
-`standard` build variant and do not request Android Notification Access.
+## Highlights
 
-### Optional Now Playing build
+- **System-wide playback capture** for apps that allow Android audio capture.
+- **AirPlay 1** support, tested with IKEA Symfonisk/Sonos receivers.
+- **Native AirPlay 2** pairing and encrypted realtime ALAC audio, tested with a
+  Sony Bravia.
+- **Automatic discovery** of AirPlay 1 and AirPlay 2 services, with duplicate
+  receiver records merged into one device.
+- **Known receivers** with remembered capabilities, protocol preference, secure
+  password storage, and quiet identity/reachability checks.
+- **Multi-receiver streaming (experimental)** across AirPlay 1, AirPlay 2, or a
+  mixture of both using one shared RTP/NTP start timeline.
+- **Background playback and volume control** while using other apps or with the
+  phone locked.
 
-The opt-in `nowPlaying` variant can share the active title, artist, progress, and
-available cover art with compatible AirPlay 2 receivers. It declares an Android
-notification-listener service and therefore requires Notification Access. Build it
-locally with:
+## Quick start
+
+1. Download the APK from the [latest GitHub release](https://github.com/obegron/lampan/releases/latest).
+2. Install it on a phone running Android 10 or newer.
+3. Put the phone and AirPlay receiver on the same Wi-Fi network.
+4. Open Lampan, tap **Scan**, and select the receiver. You can also enter its IP
+   address and port manually.
+5. Tap **Stream** and approve Android's audio-capture prompt.
+6. Start playback in another app.
+
+For password-protected AirPlay 2 receivers, enter the receiver password when
+requested. Lampan stores it only after successful authentication and protects it
+with Android Keystore.
+
+## Receiver compatibility
+
+| Receiver path | Status |
+| --- | --- |
+| AirPlay 1 / RAOP | Tested with IKEA Symfonisk; preferred automatically on dual-protocol Sonos devices. |
+| AirPlay 2 realtime ALAC + NTP | Tested with a Sony Bravia, including pairing, encrypted audio, and volume control. |
+| AirPlay 2 receivers requiring PTP | Not available to an ordinary Android app because PTP uses privileged UDP ports 319/320. Lampan uses AirPlay 1 when the receiver also offers it. |
+| Multiple receivers | Supported experimentally; different receiver buffers can still introduce a fixed audible offset. |
+
+## Build variants
+
+GitHub releases use the **`standard`** variant. It contains the complete streaming
+implementation and does not declare Android Notification Access.
+
+The opt-in **`nowPlaying`** variant can also send the active title, artist,
+progress, and available cover art to compatible AirPlay 2 receivers. It declares
+a notification-listener service and requires the user to grant Notification
+Access from Lampan's settings screen.
+
+Build either development APK with:
 
 ```shell
+./gradlew assembleStandardDebug
 ./gradlew assembleNowPlayingDebug
 ```
 
-The resulting APK is written below `app/build/outputs/apk/nowPlaying/`. The two
-variants use the same application ID, so installing one updates and replaces the
-other.
+Outputs are written below `app/build/outputs/apk/standard/` and
+`app/build/outputs/apk/nowPlaying/`. Both variants use the same application ID and
+cannot coexist. Android may require the signed GitHub build to be uninstalled
+before installing a locally debug-signed build.
 
-## Usage
+Run both unit-test variants with:
 
-1.  Ensure your Android phone and your speaker are on the **same Wi-Fi network**.
-2.  Open **Lampan**.
-3.  Tap **Scan for AirPlay Devices**.
-4.  Select your speaker from the dropdown list.
-5.  Tap **Stream**.
-6.  Grant the necessary permissions (Microphone/Audio Capture).
-7.  The app will start capturing audio. Play music or video in any other app, and it will hear it on your speaker.
+```shell
+./gradlew testStandardDebugUnitTest testNowPlayingDebugUnitTest
+```
 
-For a discovered AirPlay 2 receiver, select the device, enter its password when requested, and tap **Stream**. Lampan remembers a password only after the receiver accepts it and protects it with Android Keystore. Later launches restore the receiver from **Known Devices**, verify its identity using `GET /info`, and keep the password controls folded. Choose **Add Device** to scan again or enter an IP and protocol manually.
+## Permissions and privacy
 
-## Known Limitations
+- Playback capture uses Android's `MediaProjection` consent flow and audio-record
+  permission.
+- Nearby Devices access is used for receiver discovery on current Android
+  versions.
+- Notification Access exists only in the optional `nowPlaying` build and can be
+  disabled independently inside Lampan.
+- Receiver traffic stays on the local network. Lampan has no account system,
+  analytics service, or cloud backend.
 
-*   **Latency:** due to the nature of AirPlay 1 buffering, there is a delay (typically 2 seconds). This makes it perfect for music, podcasts, and audiobooks, but it is **not suitable for real-time gaming** or lip-synced video watching.
-*   **DRM:** Some apps (like Netflix or banking apps) block screen/audio capture for security reasons. Lampan cannot stream audio from these apps.
-*   **AirPlay 2 compatibility:** Native audio currently uses the realtime ALAC/NTP path. Receivers requiring PTP cannot use that path from an ordinary Android app because PTP requires privileged UDP ports 319/320; dual-protocol receivers such as Sonos/Symfonisk therefore default to AirPlay 1.
-*   **Multiple receivers:** AirPlay 1 and AirPlay 2 sessions can share the sender timeline, but different receiver buffering may still create a fixed output offset. Mixed groups remain experimental until verified audibly on the target receivers.
+## Known limitations
 
-## Requirements
+- AirPlay buffering adds roughly two seconds of latency, making Lampan better for
+  music, podcasts, and audiobooks than gaming or lip-synced video.
+- DRM-protected apps can prohibit Android playback capture; Lampan cannot bypass
+  that restriction.
+- Native AirPlay 2 currently implements the realtime ALAC/NTP route, not buffered
+  AAC/PTP playback.
+- Mixed receiver groups remain experimental because different hardware can apply
+  different fixed buffering delays.
 
-*   Android 10 (API level 29) or higher.
-*   An AirPlay-compatible receiver (AirPlay 1 tested on IKEA Symfonisk; native NTP-timed AirPlay 2 tested on a Sony Bravia).
+## Project
+
+- See the [changelog](CHANGELOG.md) for release history.
+- Lampan requires Android 10 (API 29) or newer.
+- Licensed under the [MIT License](LICENSE).
