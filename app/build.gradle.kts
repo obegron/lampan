@@ -12,8 +12,8 @@ android {
         applicationId = "com.egron.lampan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.3.2"
+        versionCode = 15
+        versionName = "0.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

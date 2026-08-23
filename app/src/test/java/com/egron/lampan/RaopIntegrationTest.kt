@@ -5,6 +5,7 @@ import com.egron.lampan.raop.RaopSession
 import com.egron.lampan.raop.RtpPacket
 import com.egron.lampan.raop.RtspClient
 import org.junit.Test
+import org.junit.Assume.assumeTrue
 import java.io.File
 import java.util.Base64
 import java.security.cert.X509Certificate
@@ -34,8 +35,83 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.sin
 import kotlin.math.PI
+import kotlinx.coroutines.runBlocking
 
 class RaopIntegrationTest {
+
+    @Test
+    fun lowWhiteNoiseOverAirPlay1WhenExplicitlyEnabled() = runBlocking {
+        assumeTrue(System.getenv("AIRPLAY1_WHITE_NOISE_TEST") == "true")
+        val host = System.getenv("AIRPLAY1_TEST_HOST")
+        assumeTrue(!host.isNullOrBlank())
+        val port = System.getenv("AIRPLAY1_TEST_PORT")?.toIntOrNull() ?: 7000
+        val session = RaopSession(requireNotNull(host), port) { println(it) }
+
+        try {
+            session.connect(initialVolume = 0.4f)
+            val random = Random(0x1A2B3C4D)
+            repeat(188) {
+                session.sendFrame(generateLowWhiteNoisePacket(random))
+                Thread.sleep(8L)
+            }
+            val silence = ByteArray(352 * 2 * 2)
+            repeat(375) {
+                session.sendFrame(silence)
+                Thread.sleep(8L)
+            }
+        } finally {
+            session.stop()
+        }
+    }
+
+    @Test
+    fun quietToneOverAirPlay1WhenExplicitlyEnabled() = runBlocking {
+        assumeTrue(System.getenv("AIRPLAY1_AUDIBLE_TEST") == "true")
+        val host = System.getenv("AIRPLAY1_TEST_HOST")
+        assumeTrue(!host.isNullOrBlank())
+        val port = System.getenv("AIRPLAY1_TEST_PORT")?.toIntOrNull() ?: 7000
+        val volume = System.getenv("AIRPLAY1_TEST_VOLUME")?.toFloatOrNull() ?: 0.6f
+        val amplitude = System.getenv("AIRPLAY1_TEST_AMPLITUDE")?.toDoubleOrNull() ?: 0.35
+        val durationMs = System.getenv("AIRPLAY1_TEST_DURATION_MS")?.toIntOrNull() ?: 1_000
+        val session = RaopSession(requireNotNull(host), port) { println(it) }
+
+        try {
+            // About 20 dB below the original full-scale/full-volume beep.
+            session.connect(initialVolume = volume)
+            val packetSize = 352 * 2 * 2
+            val silence = ByteArray(packetSize)
+            val tone = generateSineWave(
+                durationMs = durationMs,
+                freq = 660.0,
+                amplitude = amplitude,
+            )
+            repeat(tone.size / packetSize) { packet ->
+                val offset = packet * packetSize
+                session.sendFrame(tone.copyOfRange(offset, offset + packetSize))
+                Thread.sleep(8L)
+            }
+            repeat(375) {
+                session.sendFrame(silence)
+                Thread.sleep(8L)
+            }
+        } finally {
+            session.stop()
+        }
+    }
+
+    private fun generateLowWhiteNoisePacket(random: Random): ByteArray {
+        val frames = 352
+        val pcm = ByteArray(frames * 2 * 2)
+        repeat(frames) { frame ->
+            val sample = (random.nextInt(0x1_0000) - 0x8000).div(2).toShort()
+            repeat(2) { channel ->
+                val offset = (frame * 2 + channel) * 2
+                pcm[offset] = sample.toByte()
+                pcm[offset + 1] = (sample.toInt() ushr 8).toByte()
+            }
+        }
+        return pcm
+    }
 
     private fun generateCurve25519KeyPairBouncyCastle(): AsymmetricCipherKeyPair {
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
@@ -99,12 +175,18 @@ class RaopIntegrationTest {
         }
     }
     
-    private fun generateSineWave(durationMs: Int, freq: Double = 440.0): ByteArray {
+    private fun generateSineWave(
+        durationMs: Int,
+        freq: Double = 440.0,
+        amplitude: Double = 1.0,
+    ): ByteArray {
         val sampleRate = 44100
         val numSamples = (durationMs * sampleRate / 1000)
         val buffer = ByteArray(numSamples * 4)
         for (i in 0 until numSamples) {
-            val sample = (sin(2 * PI * i * freq / sampleRate) * 32767).toInt().toShort()
+            val sample = (
+                sin(2 * PI * i * freq / sampleRate) * 32767 * amplitude
+                ).toInt().toShort()
             val low = (sample.toInt() and 0xFF).toByte()
             val high = ((sample.toInt() shr 8) and 0xFF).toByte()
             buffer[i * 4] = low
@@ -115,6 +197,7 @@ class RaopIntegrationTest {
         return buffer
     }
 
+    // Historical manual diagnostic; keep disabled in ordinary test runs.
     // @Test
     fun testDiscoveryAndHandshake() {
         val targetIp = "192.168.0.21"

@@ -2,6 +2,10 @@ package com.egron.lampan
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.egron.lampan.raop.AirPlayDevice
+import com.egron.lampan.raop.AirPlayProtocol
+import java.security.MessageDigest
+import java.util.Base64
 
 class PreferencesManager(context: Context) {
     private val PREFS_NAME = "LampanPrefs"
@@ -21,5 +25,91 @@ class PreferencesManager(context: Context) {
     
     fun getLastUsedIp(): String {
         return prefs.getString("LAST_IP", "") ?: ""
+    }
+
+    fun saveAirPlayCapabilities(device: AirPlayDevice) {
+        val receivers = listOfNotNull(device.airPlay1Port, device.airPlay2Port)
+            .map { port -> "${device.ip}:$port" }
+        // Discovery returns fresh capability records. Keep an explicit user
+        // choice when the same device is scanned again.
+        val protocolPreference = device.protocolPreference ?: receivers
+            .asSequence()
+            .mapNotNull(::getAirPlayCapabilities)
+            .mapNotNull(AirPlayDevice::protocolPreference)
+            .firstOrNull()
+        receivers.forEach { receiver ->
+            val prefix = capabilityPrefix(receiver)
+            prefs.edit()
+                .putString("${prefix}_name", device.name)
+                .putString("${prefix}_ip", device.ip)
+                .putString("${prefix}_receiver_id", device.receiverId)
+                .putString("${prefix}_protocol_preference", protocolPreference?.name)
+                .putInt("${prefix}_airplay1_port", device.airPlay1Port ?: NO_PORT)
+                .putInt("${prefix}_airplay2_port", device.airPlay2Port ?: NO_PORT)
+                .putInt(
+                    "${prefix}_airplay2_password",
+                    when (device.airPlay2RequiresPassword) {
+                        true -> PASSWORD_REQUIRED
+                        false -> PASSWORD_NOT_REQUIRED
+                        null -> PASSWORD_UNKNOWN
+                    },
+                )
+                .apply()
+        }
+        val knownReceivers = prefs.getStringSet(KNOWN_RECEIVERS, emptySet())
+            .orEmpty()
+            .toMutableSet()
+            .apply { addAll(receivers) }
+        prefs.edit().putStringSet(KNOWN_RECEIVERS, knownReceivers).apply()
+    }
+
+    fun getAirPlayCapabilities(receiver: String): AirPlayDevice? {
+        val prefix = capabilityPrefix(receiver)
+        val ip = prefs.getString("${prefix}_ip", null) ?: return null
+        val airPlay1Port = prefs.getInt("${prefix}_airplay1_port", NO_PORT)
+            .takeIf { it != NO_PORT }
+        val airPlay2Port = prefs.getInt("${prefix}_airplay2_port", NO_PORT)
+            .takeIf { it != NO_PORT }
+        if (airPlay1Port == null && airPlay2Port == null) return null
+        return AirPlayDevice(
+            name = prefs.getString("${prefix}_name", null) ?: ip,
+            ip = ip,
+            airPlay1Port = airPlay1Port,
+            airPlay2Port = airPlay2Port,
+            airPlay2RequiresPassword = when (
+                prefs.getInt("${prefix}_airplay2_password", PASSWORD_UNKNOWN)
+            ) {
+                PASSWORD_REQUIRED -> true
+                PASSWORD_NOT_REQUIRED -> false
+                else -> null
+            },
+            receiverId = prefs.getString("${prefix}_receiver_id", null),
+            protocolPreference = prefs.getString("${prefix}_protocol_preference", null)
+                ?.let { value ->
+                    runCatching { AirPlayProtocol.valueOf(value) }.getOrNull()
+                },
+        )
+    }
+
+    fun getKnownAirPlayDevices(): List<AirPlayDevice> =
+        prefs.getStringSet(KNOWN_RECEIVERS, emptySet())
+            .orEmpty()
+            .mapNotNull(::getAirPlayCapabilities)
+            .distinctBy { it.ip }
+            .sortedBy { it.name.lowercase() }
+
+    private fun capabilityPrefix(receiver: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(receiver.toByteArray(Charsets.UTF_8))
+        return "AIRPLAY_CAP_" +
+            Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+    }
+
+    private companion object {
+        const val KNOWN_RECEIVERS = "KNOWN_AIRPLAY_RECEIVERS"
+        const val NO_PORT = -1
+        const val PASSWORD_UNKNOWN = -1
+        const val PASSWORD_NOT_REQUIRED = 0
+        const val PASSWORD_REQUIRED = 1
     }
 }

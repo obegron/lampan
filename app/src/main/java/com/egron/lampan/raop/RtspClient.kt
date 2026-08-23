@@ -9,21 +9,32 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
 
 data class RtspResponse(val code: Int, val headers: Map<String, String>, val body: String, val rawBody: ByteArray = ByteArray(0))
 
-class RtspClient(private val host: String, private val port: Int, private val logCallback: ((String) -> Unit)? = null) {
+class RtspClient(
+    private val host: String,
+    private val port: Int,
+    private val logBinaryBodies: Boolean = true,
+    private val logCallback: ((String) -> Unit)? = null,
+) {
     private val TAG = "RtspClient"
     private var socket: Socket? = null
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
     private var cseq = 1
+    private var encryptedChannel: HomeKitRtspChannel? = null
 
     private fun log(msg: String) {
-        Log.d(TAG, msg)
-        logCallback?.invoke(msg)
+        val callback = logCallback
+        if (callback != null) {
+            callback(msg)
+        } else {
+            Log.d(TAG, msg)
+        }
     }
 
     fun hexDump(data: ByteArray): String {
@@ -51,16 +62,36 @@ class RtspClient(private val host: String, private val port: Int, private val lo
 
     fun connect() {
         log("Connecting to $host:$port...")
-        socket = Socket(host, port)
+        socket = Socket().apply {
+            // Socket also has a `port` property (zero before connection), so
+            // qualify the configured receiver port inside this apply block.
+            connect(InetSocketAddress(host, this@RtspClient.port), SOCKET_TIMEOUT_MS)
+            soTimeout = SOCKET_TIMEOUT_MS
+        }
         inputStream = socket!!.getInputStream()
         outputStream = socket!!.getOutputStream()
+    }
+
+    /** Enable HomeKit framing for every request and response after pair-verify M4. */
+    fun enableEncryptedControl(cipher: HomeKitControlCipher) {
+        check(encryptedChannel == null) { "Encrypted RTSP control is already enabled" }
+        encryptedChannel = HomeKitRtspChannel(cipher)
+        log("AirPlay 2 encrypted control channel enabled")
     }
     
     fun getLocalAddress(): java.net.InetAddress? {
         return socket?.localAddress
     }
 
-    fun sendRequest(method: String, url: String, headers: Map<String, String>, body: String = "", rawBody: ByteArray? = null): RtspResponse {
+    @Synchronized
+    fun sendRequest(
+        method: String,
+        url: String,
+        headers: Map<String, String>,
+        body: String = "",
+        rawBody: ByteArray? = null,
+        logExchange: Boolean = true,
+    ): RtspResponse {
         val out = outputStream ?: throw IllegalStateException("Not connected")
         
         val sb = StringBuilder()
@@ -81,33 +112,49 @@ class RtspClient(private val host: String, private val port: Int, private val lo
         
         sb.append("\r\n")
         
-        // Debug logging
-        log("--- Sending Request ---")
-        log(sb.toString().trim())
-        if (contentBytes.isNotEmpty()) {
-            if (rawBody == null) {
-                log(body)
-            } else {
-                log("<Binary Body: ${contentBytes.size} bytes>")
-                log(hexDump(contentBytes))
+        if (logExchange) {
+            log("--- Sending Request ---")
+            log(sb.toString().trim())
+            if (contentBytes.isNotEmpty()) {
+                if (rawBody == null) {
+                    log(body)
+                } else if (logBinaryBodies) {
+                    log("<Binary Body: ${contentBytes.size} bytes>")
+                    log(hexDump(contentBytes))
+                } else {
+                    log("<Binary Body: ${contentBytes.size} bytes>")
+                }
             }
+            log("-----------------------")
         }
-        log("-----------------------")
 
         val headerBytes = sb.toString().toByteArray(StandardCharsets.UTF_8)
-        out.write(headerBytes)
-        
-        if (contentBytes.isNotEmpty()) {
-            out.write(contentBytes)
-        }
+        val requestBytes = ByteArray(headerBytes.size + contentBytes.size)
+        System.arraycopy(headerBytes, 0, requestBytes, 0, headerBytes.size)
+        System.arraycopy(contentBytes, 0, requestBytes, headerBytes.size, contentBytes.size)
+        out.write(encryptedChannel?.encrypt(requestBytes) ?: requestBytes)
         out.flush()
 
-        return readResponse()
+        return readResponse(logExchange)
     }
 
-    private fun readResponse(): RtspResponse {
+    private fun readResponse(logExchange: Boolean): RtspResponse {
         val inStream = inputStream ?: throw IllegalStateException("Not connected")
-        
+        val channel = encryptedChannel
+        return if (channel == null) {
+            readResponseFromStream(inStream, logExchange)
+        } else {
+            readResponseFromStream(
+                ByteArrayInputStream(channel.readMessage(inStream)),
+                logExchange,
+            )
+        }
+    }
+
+    private fun readResponseFromStream(
+        inStream: InputStream,
+        logExchange: Boolean,
+    ): RtspResponse {
         val statusLine = readLine(inStream) ?: throw Exception("Connection closed")
         // Status line e.g. "RTSP/1.0 200 OK"
         val parts = statusLine.split(" ")
@@ -123,10 +170,11 @@ class RtspClient(private val host: String, private val port: Int, private val lo
             }
         }
 
-        // Debug logging
-        log("--- Received Response ---")
-        log(statusLine)
-        headers.forEach { (k, v) -> log("$k: $v") }
+        if (logExchange) {
+            log("--- Received Response ---")
+            log(statusLine)
+            headers.forEach { (k, v) -> log("$k: $v") }
+        }
         
         val contentLength = headers["Content-Length"]?.toIntOrNull() ?: 0
         val rawBodyBytes = if (contentLength > 0) {
@@ -142,16 +190,18 @@ class RtspClient(private val host: String, private val port: Int, private val lo
             ByteArray(0)
         }
         
-        if (rawBodyBytes.isNotEmpty()) {
+        if (logExchange && rawBodyBytes.isNotEmpty()) {
             val contentType = headers["Content-Type"] ?: ""
             if (contentType.startsWith("text/") || contentType.contains("sdp")) {
                  log("Body: ${String(rawBodyBytes, StandardCharsets.UTF_8)}")
-            } else {
+            } else if (logBinaryBodies) {
                  log("<Binary Body: ${rawBodyBytes.size} bytes>")
                  log(hexDump(rawBodyBytes))
+            } else {
+                 log("<Binary Body: ${rawBodyBytes.size} bytes>")
             }
         }
-        log("-------------------------")
+        if (logExchange) log("-------------------------")
         
         val bodyString = if (rawBodyBytes.isNotEmpty()) String(rawBodyBytes, StandardCharsets.ISO_8859_1) else ""
 
@@ -177,6 +227,14 @@ class RtspClient(private val host: String, private val port: Int, private val lo
 
     fun close() {
         socket?.close()
+        socket = null
+        inputStream = null
+        outputStream = null
+        encryptedChannel = null
+    }
+
+    private companion object {
+        const val SOCKET_TIMEOUT_MS = 10_000
     }
 
     fun parseBinaryPlist(data: ByteArray): NSDictionary {

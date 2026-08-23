@@ -25,7 +25,7 @@ import kotlinx.coroutines.launch
 
 class RaopSession(private var host: String, private val port: Int = 7000, private val logCallback: ((String) -> Unit)? = null) {
     private val TAG = "RaopSession"
-    private val client = RtspClient(host, port, logCallback)
+    private val client = RtspClient(host, port, logCallback = logCallback)
     private var sessionId: String? = null
     private var clientInstance: String? = null
     private var activeRemote: String? = null
@@ -45,6 +45,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     private var ssrc = 0
     private var packetCount = 0L
     private var firstSyncSent = false
+    @Volatile private var timingRequestsReceived = 0
     private val encoder = AlacEncoder()
     private val random = Random() 
 
@@ -81,12 +82,14 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             sessionId = (Math.abs(random.nextInt()) % 1000000000 + 100000000).toString() 
         }
         
-        // Randomize RTP state
-        rtpSeqNum = random.nextInt(65536)
-        rtpTimestamp = Math.abs(random.nextLong())
-        ssrc = random.nextInt()
+        // Start from the neutral RTP origin used by the proven Sonos RAOP flow.
+        // The receiver uses the RECORD values to establish its initial timeline.
+        rtpSeqNum = 0
+        rtpTimestamp = 0L
+        ssrc = 0
         packetCount = 0
         firstSyncSent = false
+        timingRequestsReceived = 0
         
         if (clientInstance == null) { 
             val clientInstanceBytes = ByteArray(8)
@@ -234,15 +237,33 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             log(errorMsg)
             throw Exception(errorMsg)
         }
-        
-        // Send initial Sync packet immediately
-        sendSyncPacket(true)
-        firstSyncSent = true
-        
-        // Set initial volume
-        delay(100)
+
+
+        // Match the RAOP startup order used by the working Sonos path. Sync is
+        // sent immediately before the first audio packet in sendFrame().
         setVolume(initialVolume)
+        sendProgress()
         log("Initial volume set to $initialVolume")
+
+        // Give the receiver a short, timestamped preroll before live capture.
+        // This is part of the known-good Sonos startup flow and ensures its
+        // render buffer is primed before the first audible phone sample.
+        val silence = ByteArray(FRAMES_PER_PACKET * CHANNELS * BYTES_PER_SAMPLE)
+        repeat(STARTUP_SILENCE_PACKETS) {
+            sendFrame(silence)
+            delay(PACKET_DURATION_MS)
+        }
+        if (timingRequestsReceived > 0) {
+            log(
+                "RaopSession: Timing healthy ($timingRequestsReceived request(s)); " +
+                    "local=${clientTimingSocket?.localPort}, receiver=$serverTimingPort",
+            )
+        } else {
+            log(
+                "RaopSession: Warning: receiver has not contacted timing port " +
+                    "${clientTimingSocket?.localPort} (receiver timing=$serverTimingPort)",
+            )
+        }
     }
 
     private fun startUdpListener(socket: DatagramSocket, name: String) {
@@ -259,6 +280,13 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
                     // log("UDP $name received $len bytes from ${packet.address}:${packet.port}: $hex...")
                     
                     if (name == "Timing" && len >= 32 && buffer[0] == 0x80.toByte() && buffer[1] == 0xD2.toByte()) {
+                        timingRequestsReceived++
+                        if (timingRequestsReceived == 1) {
+                            log(
+                                "RaopSession: First timing request received " +
+                                    "from ${packet.address.hostAddress}:${packet.port}",
+                            )
+                        }
                         val response = ByteArray(32)
                         response[0] = 0x80.toByte()
                         response[1] = 0xD3.toByte()
@@ -314,9 +342,8 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             buffer.put(b0.toByte()) 
             buffer.put(0xD4.toByte()) // M=1, PT=84
             
-            // Sequence number 7 (Little Endian to match PipeWire quirk: 07 00)
-            buffer.put(7.toByte())
-            buffer.put(0.toByte())
+            // Fixed sync sequence field in network byte order.
+            buffer.putShort(7)
             
             // Header Timestamp: current RTP timestamp minus latency
             buffer.putInt((rtpTimestamp - latencySamples).toInt())
@@ -385,7 +412,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         val db = if (clampedVol == 0.0f) -144.0f else (clampedVol * 30.0f) - 30.0f
         
         try {
-            val content = "volume: $db"
+            val content = "volume: $db\r\n"
             val headers = mutableMapOf(
                 "Content-Type" to "text/parameters",
                 "Client-Instance" to clientInstance!!,
@@ -399,6 +426,23 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    private fun sendProgress() {
+        val headers = mutableMapOf(
+            "Content-Type" to "text/parameters",
+            "Client-Instance" to clientInstance!!,
+            "DACP-ID" to clientInstance!!,
+            "User-Agent" to "Lampan/0.1.0",
+        )
+        serverSession?.let { headers["Session"] = it }
+        val response = client.sendRequest(
+            "SET_PARAMETER",
+            "rtsp://$host:$port/${sessionId!!}",
+            headers,
+            body = "progress: 0/0/0\r\n",
+        )
+        log("Initial progress returned RTSP ${response.code}")
     }
 
     fun stop() {
@@ -428,6 +472,14 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         val kpGen = X25519KeyPairGenerator()
         kpGen.init(KeyGenerationParameters(SecureRandom(), 255))
         return kpGen.generateKeyPair()
+    }
+
+    private companion object {
+        const val FRAMES_PER_PACKET = 352
+        const val CHANNELS = 2
+        const val BYTES_PER_SAMPLE = 2
+        const val STARTUP_SILENCE_PACKETS = 50
+        const val PACKET_DURATION_MS = 8L
     }
     
     private fun getLocalIpAddress(): String? {

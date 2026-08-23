@@ -96,4 +96,34 @@ class AlacEncoder {
         writer.flush()
         return out.toByteArray()
     }
+
+    /**
+     * Wrap exactly 352 stereo PCM frames in the fixed-size, uncompressed ALAC
+     * element used by an AirPlay 2 realtime stream.
+     */
+    fun encodeAirPlay2(pcm: ByteArray): ByteArray {
+        require(pcm.size == AIRPLAY2_PCM_BYTES) {
+            "AirPlay 2 ALAC packets require exactly 352 stereo PCM frames"
+        }
+
+        val out = ByteArrayOutputStream(AIRPLAY2_PCM_BYTES + 4)
+        val writer = BitWriter(out)
+        writer.write(1, 3) // Stereo channel-pair element.
+        writer.write(0, 4)
+        writer.write(0, 12)
+        writer.write(0, 1) // Fixed 352-frame size comes from the stream format.
+        writer.write(0, 2) // No wasted bytes.
+        writer.write(1, 1) // Uncompressed escape frame.
+        for (index in pcm.indices step 2) {
+            writer.write(pcm[index + 1].toInt() and 0xFF, 8)
+            writer.write(pcm[index].toInt() and 0xFF, 8)
+        }
+        writer.write(7, 3) // End element.
+        writer.flush()
+        return out.toByteArray()
+    }
+
+    private companion object {
+        const val AIRPLAY2_PCM_BYTES = 352 * 2 * 2
+    }
 }
