@@ -1,3 +1,5 @@
+import java.time.Instant
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -5,6 +7,7 @@ plugins {
 
 val releaseStoreFile = System.getenv("LAMPAN_RELEASE_STORE_FILE")
 val releaseStorePassword = System.getenv("LAMPAN_RELEASE_STORE_PASSWORD")
+val lampanBuildTimeUtc = Instant.now().toString()
 val releaseSigningValues = listOf(releaseStoreFile, releaseStorePassword)
 if (releaseSigningValues.any { !it.isNullOrBlank() } &&
     releaseSigningValues.any { it.isNullOrBlank() }
@@ -21,12 +24,25 @@ android {
         applicationId = "com.egron.lampan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.4.3"
+        versionCode = 24
+        versionName = "0.4.9"
+        buildConfigField("String", "BUILD_TIME_UTC", "\"$lampanBuildTimeUtc\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    flavorDimensions += "features"
+    productFlavors {
+        create("standard") {
+            dimension = "features"
+            buildConfigField("boolean", "NOW_PLAYING_ENABLED", "false")
+        }
+        create("nowPlaying") {
+            dimension = "features"
+            buildConfigField("boolean", "NOW_PLAYING_ENABLED", "true")
         }
     }
 
@@ -59,6 +75,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"

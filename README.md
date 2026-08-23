@@ -21,7 +21,23 @@ Lampan solves this by capturing internal audio and streaming it via the AirPlay 
 
 ## Installation
 
-Install the APK on your Android device.
+Install the APK from the GitHub release on your Android device. Release APKs use the
+`standard` build variant and do not request Android Notification Access.
+
+### Optional Now Playing build
+
+The opt-in `nowPlaying` variant can share the active title, artist, progress, and
+available cover art with compatible AirPlay 2 receivers. It declares an Android
+notification-listener service and therefore requires Notification Access. Build it
+locally with:
+
+```shell
+./gradlew assembleNowPlayingDebug
+```
+
+The resulting APK is written below `app/build/outputs/apk/nowPlaying/`. The two
+variants use the same application ID, so installing one updates and replaces the
+other.
 
 ## Usage
 

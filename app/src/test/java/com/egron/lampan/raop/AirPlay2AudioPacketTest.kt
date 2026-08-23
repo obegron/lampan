@@ -67,6 +67,32 @@ class AirPlay2AudioPacketTest {
         assertTrue(text.contains("astn\u0000\u0000\u0000\u0002\u0000\u0001"))
     }
 
+    @Test
+    fun playbackProgressUsesTheCurrentStreamTimeline() {
+        assertEquals(
+            "99000/100000/109000",
+            buildAirPlayProgress(
+                rtpTimestamp = 100_000L,
+                positionMs = 1_000L,
+                durationMs = 10_000L,
+                sampleRate = 1_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun playbackProgressWrapsAtTheRtpCounterBoundary() {
+        assertEquals(
+            "4294967196/100/900",
+            buildAirPlayProgress(
+                rtpTimestamp = 100L,
+                positionMs = 200L,
+                durationMs = 1_000L,
+                sampleRate = 1_000L,
+            ),
+        )
+    }
+
     private fun ByteArray.readBigEndianInt(offset: Int): Int =
         ((this[offset].toInt() and 0xFF) shl 24) or
             ((this[offset + 1].toInt() and 0xFF) shl 16) or

@@ -27,6 +27,33 @@ class PreferencesManager(context: Context) {
         return prefs.getString("LAST_IP", "") ?: ""
     }
 
+    fun saveVolume(volume: Float) {
+        prefs.edit().putFloat(LAST_VOLUME, volume.coerceIn(0f, 1f)).apply()
+    }
+
+    fun getVolume(): Float =
+        prefs.getFloat(LAST_VOLUME, DEFAULT_VOLUME).coerceIn(0f, 1f)
+
+    fun saveDebugInformationEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(SHOW_DEBUG_INFORMATION, enabled).apply()
+    }
+
+    fun isDebugInformationEnabled(): Boolean =
+        prefs.getBoolean(SHOW_DEBUG_INFORMATION, false)
+
+    fun saveNowPlayingInformationEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(NOW_PLAYING_INFORMATION_ENABLED, enabled).apply()
+    }
+
+    fun isNowPlayingInformationEnabled(): Boolean =
+        prefs.getBoolean(NOW_PLAYING_INFORMATION_ENABLED, true)
+
+    fun saveDarkThemeEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(DARK_THEME_ENABLED, enabled).apply()
+    }
+
+    fun isDarkThemeEnabled(): Boolean = prefs.getBoolean(DARK_THEME_ENABLED, true)
+
     fun saveAirPlayCapabilities(device: AirPlayDevice) {
         val receivers = listOfNotNull(device.airPlay1Port, device.airPlay2Port)
             .map { port -> "${device.ip}:$port" }
@@ -107,6 +134,11 @@ class PreferencesManager(context: Context) {
 
     private companion object {
         const val KNOWN_RECEIVERS = "KNOWN_AIRPLAY_RECEIVERS"
+        const val LAST_VOLUME = "LAST_VOLUME"
+        const val SHOW_DEBUG_INFORMATION = "SHOW_DEBUG_INFORMATION"
+        const val NOW_PLAYING_INFORMATION_ENABLED = "NOW_PLAYING_INFORMATION_ENABLED"
+        const val DARK_THEME_ENABLED = "DARK_THEME_ENABLED"
+        const val DEFAULT_VOLUME = 0.5f
         const val NO_PORT = -1
         const val PASSWORD_UNKNOWN = -1
         const val PASSWORD_NOT_REQUIRED = 0

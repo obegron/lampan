@@ -17,8 +17,10 @@ import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -51,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -92,12 +95,18 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            var isDarkTheme by rememberSaveable { mutableStateOf(true) }
+            val preferences = remember { PreferencesManager(this@MainActivity) }
+            var isDarkTheme by rememberSaveable {
+                mutableStateOf(preferences.isDarkThemeEnabled())
+            }
             LampanTheme(darkTheme = isDarkTheme) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -105,7 +114,10 @@ class MainActivity : ComponentActivity() {
                 ) {
                     MainScreen(
                         isDarkTheme = isDarkTheme,
-                        onToggleTheme = { isDarkTheme = !isDarkTheme }
+                        onToggleTheme = {
+                            isDarkTheme = !isDarkTheme
+                            preferences.saveDarkThemeEnabled(isDarkTheme)
+                        }
                     )
                 }
             }
@@ -155,6 +167,13 @@ private enum class ReceiverReachability {
     DIFFERENT_RECEIVER,
     UNREACHABLE,
 }
+
+private data class AddDeviceReturnState(
+    val device: AirPlayDevice?,
+    val receiverAddresses: Set<String>,
+    val protocol: AirPlayProtocol,
+    val ipAddress: String,
+)
 
 private const val REACHABILITY_REFRESH_MS = 10_000L
 private val RECEIVER_AVAILABLE_COLOR = Color(0xFF4CAF50)
@@ -254,6 +273,7 @@ fun MainScreen(
     }
     var pendingReceiverAddresses by remember { mutableStateOf(emptySet<String>()) }
     var isAddingDevice by remember { mutableStateOf(initialDevice == null) }
+    var addDeviceReturnState by remember { mutableStateOf<AddDeviceReturnState?>(null) }
     var receiverReachabilityByAddress by remember {
         mutableStateOf(emptyMap<String, ReceiverReachability>())
     }
@@ -264,7 +284,17 @@ fun MainScreen(
     var hasSavedAirPlay2Pairing by remember { mutableStateOf(false) }
     var hasSavedAirPlay2Password by remember { mutableStateOf(false) }
     var confirmForgetAirPlay2Pairing by remember { mutableStateOf(false) }
-    var volume by remember { mutableStateOf(1.0f) }
+    var volume by remember { mutableStateOf(prefsManager.getVolume()) }
+    var showDebugInformation by remember {
+        mutableStateOf(prefsManager.isDebugInformationEnabled())
+    }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var nowPlayingInformationEnabled by remember {
+        mutableStateOf(prefsManager.isNowPlayingInformationEnabled())
+    }
+    var nowPlayingAccessEnabled by remember {
+        mutableStateOf(isNowPlayingAccessEnabled(context))
+    }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     // Use a list for logs
@@ -304,6 +334,7 @@ fun MainScreen(
                 selectedReceiverAddresses = setOf(preferredReceiverAddress(remembered))
             }
             isAddingDevice = false
+            addDeviceReturnState = null
         }
     }
 
@@ -448,10 +479,22 @@ fun MainScreen(
                     val active = intent.getStringArrayListExtra(
                         AudioCaptureService.EXTRA_ACTIVE_RECEIVERS,
                     ).orEmpty().toSet()
+                    val streamActive = intent.getBooleanExtra(
+                        AudioCaptureService.EXTRA_IS_STREAMING,
+                        active.isNotEmpty(),
+                    )
                     val receiverError = intent.getStringExtra(
                         AudioCaptureService.EXTRA_RECEIVER_ERROR,
                     )
-                    selectedReceiverAddresses = active
+                    isConnected = streamActive
+                    isConnecting = false
+                    if (streamActive && active.isNotEmpty()) {
+                        selectedReceiverAddresses = active
+                        volume = intent.getFloatExtra(
+                            AudioCaptureService.EXTRA_CURRENT_VOLUME,
+                            volume,
+                        )
+                    }
                     pendingReceiverAddresses = emptySet()
                     receiverError?.let { errorMessage = it }
 
@@ -478,6 +521,11 @@ fun MainScreen(
             receiver,
             filter,
             ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        context.startService(
+            Intent(context, AudioCaptureService::class.java).apply {
+                action = AudioCaptureService.ACTION_QUERY_STATE
+            },
         )
         onDispose {
             context.unregisterReceiver(receiver)
@@ -604,6 +652,17 @@ fun MainScreen(
         }
     }
 
+    val notificationAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) {
+        nowPlayingAccessEnabled = isNowPlayingAccessEnabled(context)
+        context.startService(
+            Intent(context, AudioCaptureService::class.java).apply {
+                action = AudioCaptureService.ACTION_REFRESH_NOW_PLAYING
+            },
+        )
+    }
+
     val backgroundBrush = Brush.linearGradient(
         colors = listOf(
             MaterialTheme.colorScheme.background,
@@ -612,25 +671,61 @@ fun MainScreen(
         )
     )
 
+    BackHandler(enabled = showSettings) {
+        showSettings = false
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundBrush)
             .padding(16.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
+        if (showSettings) {
+            SettingsScreen(
+                isDarkTheme = isDarkTheme,
+                onToggleTheme = onToggleTheme,
+                showDebugInformation = showDebugInformation,
+                onShowDebugInformationChanged = { enabled ->
+                    showDebugInformation = enabled
+                    prefsManager.saveDebugInformationEnabled(enabled)
+                },
+                nowPlayingInformationEnabled = nowPlayingInformationEnabled,
+                nowPlayingAccessEnabled = nowPlayingAccessEnabled,
+                onNowPlayingInformationChanged = { enabled ->
+                    nowPlayingInformationEnabled = enabled
+                    prefsManager.saveNowPlayingInformationEnabled(enabled)
+                    context.startService(
+                        Intent(context, AudioCaptureService::class.java).apply {
+                            action = AudioCaptureService.ACTION_REFRESH_NOW_PLAYING
+                        },
+                    )
+                    if (enabled && !nowPlayingAccessEnabled) {
+                        notificationAccessLauncher.launch(
+                            Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS),
+                        )
+                    }
+                },
+                onManageNowPlayingAccess = {
+                    notificationAccessLauncher.launch(
+                        Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS),
+                    )
+                },
+                onBack = { showSettings = false },
+            )
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
             HeaderCard(
                 title = "Lampan",
                 subtitle = "AirPlay audio streaming",
                 isConnected = isConnected,
                 currentSsid = currentSsid,
-                isDarkTheme = isDarkTheme,
-                onToggleTheme = onToggleTheme
+                onOpenSettings = { showSettings = true },
             )
 
             SectionCard(title = "Receiver") {
@@ -683,6 +778,7 @@ fun MainScreen(
                                     selectedDevice = device
                                     receiverProtocol = protocol
                                     isAddingDevice = false
+                                    addDeviceReturnState = null
                                     isScanning = false
                                     updateIpAddress("${device.ip}:$port")
                                     if (isConnected) {
@@ -713,6 +809,7 @@ fun MainScreen(
                                     selectedDevice = device
                                     receiverProtocol = protocol
                                     isAddingDevice = false
+                                    addDeviceReturnState = null
                                     updateIpAddress("${device.ip}:$port")
                                 }
                             }
@@ -722,6 +819,33 @@ fun MainScreen(
                 }
 
                 if (isAddingDevice || knownDevices.isEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Add receiver", style = MaterialTheme.typography.titleSmall)
+                        if (addDeviceReturnState != null) {
+                            TextButton(
+                                onClick = {
+                                    val previous = addDeviceReturnState
+                                    isScanning = false
+                                    discoveredDevices = emptyList()
+                                    isAddingDevice = false
+                                    addDeviceReturnState = null
+                                    if (previous != null) {
+                                        selectedDevice = previous.device
+                                        selectedReceiverAddresses = previous.receiverAddresses
+                                        receiverProtocol = previous.protocol
+                                        updateIpAddress(previous.ipAddress)
+                                    }
+                                    focusManager.clearFocus()
+                                },
+                            ) {
+                                Text("Cancel")
+                            }
+                        }
+                    }
                     Text(
                         text = "Scan for a receiver or enter its IP and port manually.",
                         style = MaterialTheme.typography.bodySmall,
@@ -741,6 +865,7 @@ fun MainScreen(
                                 selectedReceiverAddresses =
                                     setOf(preferredReceiverAddress(remembered))
                                 isAddingDevice = false
+                                addDeviceReturnState = null
                             } else {
                                 selectedReceiverAddresses = emptySet()
                             }
@@ -1041,6 +1166,12 @@ fun MainScreen(
                     OutlinedButton(
                         onClick = {
                             if (!isAddingDevice && knownDevices.isNotEmpty()) {
+                                addDeviceReturnState = AddDeviceReturnState(
+                                    device = selectedDevice,
+                                    receiverAddresses = selectedReceiverAddresses,
+                                    protocol = receiverProtocol,
+                                    ipAddress = ipAddress,
+                                )
                                 if (!isConnected) {
                                     selectedDevice = null
                                     selectedReceiverAddresses = emptySet()
@@ -1198,6 +1329,7 @@ fun MainScreen(
                                 prefsManager.saveAirPlayCapabilities(selected)
                                 knownDevices = prefsManager.getKnownAirPlayDevices()
                                 isAddingDevice = false
+                                addDeviceReturnState = null
                                 updateIpAddress("${selected.ip}:$port")
                                 isScanning = false
                                 val address = preferredReceiverAddress(selected)
@@ -1233,6 +1365,7 @@ fun MainScreen(
                         value = volume,
                         onValueChange = { volume = it },
                         onValueChangeFinished = {
+                            prefsManager.saveVolume(volume)
                             val intent = Intent(context, AudioCaptureService::class.java).apply {
                                 action = "SET_VOLUME"
                                 putExtra("VOLUME", volume)
@@ -1244,7 +1377,7 @@ fun MainScreen(
                 }
             }
 
-            SectionCard(title = "Logs") {
+            if (showDebugInformation) SectionCard(title = "Logs") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1289,26 +1422,183 @@ fun MainScreen(
                 }
             }
 
-            SectionCard(title = "Utilities") {
-                Text(
-                    text = "Quick audio ping to confirm local output is working.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = {
-                        val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
-                        toneGen.startTone(ToneGenerator.TONE_CDMA_PIP, 500)
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Play Test Sound (Local)")
-                }
             }
         }
     }
 }
+
+@Composable
+private fun SettingsScreen(
+    isDarkTheme: Boolean,
+    onToggleTheme: () -> Unit,
+    showDebugInformation: Boolean,
+    onShowDebugInformationChanged: (Boolean) -> Unit,
+    nowPlayingInformationEnabled: Boolean,
+    nowPlayingAccessEnabled: Boolean,
+    onNowPlayingInformationChanged: (Boolean) -> Unit,
+    onManageNowPlayingAccess: () -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        SectionCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_arrow_back),
+                        contentDescription = "Back",
+                    )
+                }
+                Column(modifier = Modifier.padding(start = 4.dp)) {
+                    Text("Settings", style = MaterialTheme.typography.headlineSmall)
+                    Text(
+                        "Configure Lampan",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (BuildConfig.NOW_PLAYING_ENABLED) {
+            SectionCard(title = "Now playing") {
+                SettingsSwitchRow(
+                    title = "Send now-playing information",
+                    description = "Share titles, artists, progress, and available cover art " +
+                        "with AirPlay 2 receivers.",
+                    checked = nowPlayingInformationEnabled,
+                    onCheckedChange = onNowPlayingInformationChanged,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = if (nowPlayingAccessEnabled) {
+                        "Android Notification Access is granted."
+                    } else {
+                        "Android Notification Access is required before Lampan can read the " +
+                            "active media session."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (nowPlayingAccessEnabled) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedButton(
+                    onClick = onManageNowPlayingAccess,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Manage Notification Access")
+                }
+            }
+        }
+
+        SectionCard(title = "Appearance") {
+            SettingsSwitchRow(
+                title = "Dark theme",
+                description = "Use Lampan's dark colour scheme.",
+                checked = isDarkTheme,
+                onCheckedChange = { enabled ->
+                    if (enabled != isDarkTheme) onToggleTheme()
+                },
+            )
+        }
+
+        SectionCard(title = "Diagnostics") {
+            SettingsSwitchRow(
+                title = "Show debug information",
+                description = "Display protocol and session logs on the streaming screen.",
+                checked = showDebugInformation,
+                onCheckedChange = onShowDebugInformationChanged,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Play a short sound on this phone to confirm local output is working.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            OutlinedButton(
+                onClick = {
+                    ToneGenerator(AudioManager.STREAM_MUSIC, 60).startTone(
+                        ToneGenerator.TONE_CDMA_PIP,
+                        350,
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Play local test sound")
+            }
+        }
+
+        SectionCard(title = "About") {
+            AboutRow("Version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            AboutRow(
+                "Variant",
+                if (BuildConfig.NOW_PLAYING_ENABLED) "Now Playing" else "Standard",
+            )
+            AboutRow("Build type", BuildConfig.BUILD_TYPE)
+            AboutRow("Built", formattedBuildTime(BuildConfig.BUILD_TIME_UTC))
+            AboutRow("Package", BuildConfig.APPLICATION_ID)
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun AboutRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(value, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private fun formattedBuildTime(value: String): String = runCatching {
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm z")
+        .format(Instant.parse(value).atZone(ZoneId.systemDefault()))
+}.getOrDefault(value)
 
 @Composable
 private fun HeaderCard(
@@ -1316,8 +1606,7 @@ private fun HeaderCard(
     subtitle: String,
     isConnected: Boolean,
     currentSsid: String,
-    isDarkTheme: Boolean,
-    onToggleTheme: () -> Unit
+    onOpenSettings: () -> Unit,
 ) {
     SectionCard {
         Row(
@@ -1334,12 +1623,10 @@ private fun HeaderCard(
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
-                IconButton(onClick = onToggleTheme) {
+                IconButton(onClick = onOpenSettings) {
                     Icon(
-                        painter = painterResource(
-                            id = if (isDarkTheme) R.drawable.ic_theme_sun else R.drawable.ic_theme_moon
-                        ),
-                        contentDescription = if (isDarkTheme) "Switch to light theme" else "Switch to dark theme"
+                        painter = painterResource(R.drawable.ic_settings),
+                        contentDescription = "Open settings",
                     )
                 }
                 StatusPill(isConnected = isConnected)

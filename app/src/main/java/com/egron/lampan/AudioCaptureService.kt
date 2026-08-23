@@ -24,11 +24,12 @@ import kotlinx.coroutines.sync.withLock
 class AudioCaptureService : Service() {
 
     private var audioCapture: AudioCapture? = null
+    private var nowPlayingMonitor: NowPlayingMonitor? = null
     private var receiverSessions = emptyMap<String, ReceiverSession>()
     private val receiverSessionLock = Any()
     private val receiverChangeMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
-    @Volatile private var currentVolume = 1.0f
+    @Volatile private var currentVolume = DEFAULT_INITIAL_VOLUME
     @Volatile private var captureStarted = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -41,6 +42,12 @@ class AudioCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             "START" -> {
+                if (hasActiveStream()) {
+                    sendReceiverStateBroadcast(
+                        error = "Lampan is already streaming; disconnect it before starting again",
+                    )
+                    return START_NOT_STICKY
+                }
                 val resultCode = intent.getIntExtra("RESULT_CODE", 0)
                 val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra("DATA", Intent::class.java)
@@ -50,7 +57,10 @@ class AudioCaptureService : Service() {
                 }
                 val host = intent.getStringExtra("HOST") ?: "192.168.1.1"
                 val port = intent.getIntExtra("PORT", 7000)
-                val initialVolume = intent.getFloatExtra("INITIAL_VOLUME", 1.0f)
+                val initialVolume = intent.getFloatExtra(
+                    "INITIAL_VOLUME",
+                    DEFAULT_INITIAL_VOLUME,
+                )
                 val useAirPlay2 = intent.getBooleanExtra("AIRPLAY2", false)
                 val useTransientAirPlay2 = intent.getBooleanExtra("AIRPLAY2_TRANSIENT", false)
                 val airPlay2Password = intent.getStringExtra("AIRPLAY2_PASSWORD")
@@ -75,8 +85,20 @@ class AudioCaptureService : Service() {
                 stopCapture()
                 stopSelf()
             }
+            ACTION_QUERY_STATE -> {
+                val active = hasActiveStream()
+                sendReceiverStateBroadcast()
+                if (!active) stopSelf(startId)
+            }
+            ACTION_REFRESH_NOW_PLAYING -> {
+                if (hasActiveStream()) {
+                    startNowPlayingMonitor()
+                } else {
+                    stopSelf(startId)
+                }
+            }
             "SET_VOLUME" -> {
-                val vol = intent.getFloatExtra("VOLUME", 1.0f)
+                val vol = intent.getFloatExtra("VOLUME", currentVolume)
                 currentVolume = vol
                 scope.launch {
                     receiverSessionSnapshot().forEach { it.setVolume(vol) }
@@ -217,11 +239,24 @@ class AudioCaptureService : Service() {
                             "[Group] ${targets.size} receivers share one RTP/NTP timeline " +
                                 "($protocolLabel)",
                         )
+                    } else {
+                        // A standalone RAOP receiver needs the same short future-dated
+                        // start used by grouped playback. Without it, its first RTP
+                        // packet is timestamped for "now" and can already be late by
+                        // the time it reaches the receiver's render buffer.
+                        preparedSessions.values.singleOrNull()
+                            ?.takeIf(ReceiverSession::usesAirPlay1)
+                            ?.let { session ->
+                                session.synchronizeAt(
+                                    System.currentTimeMillis() + GROUP_START_DELAY_MS,
+                                )
+                            }
                     }
                     sendReceiverStateBroadcast()
                     sendStatusBroadcast("Connected. Starting capture...")
                     audioCapture?.start()
                     captureStarted = true
+                    startNowPlayingMonitor()
                 } catch (e: Exception) {
                     e.printStackTrace()
                     sendErrorBroadcast("Connection failed: ${e.message}")
@@ -422,12 +457,32 @@ class AudioCaptureService : Service() {
     private fun receiverSessionAddresses(): Set<String> =
         synchronized(receiverSessionLock) { receiverSessions.keys.toSet() }
 
+    private fun hasActiveStream(): Boolean =
+        captureStarted || audioCapture != null || receiverSessionAddresses().isNotEmpty()
+
+    private fun startNowPlayingMonitor() {
+        nowPlayingMonitor?.close()
+        nowPlayingMonitor = null
+        if (!BuildConfig.NOW_PLAYING_ENABLED) return
+        if (!PreferencesManager(this).isNowPlayingInformationEnabled()) return
+        if (!isNowPlayingAccessEnabled(this)) return
+        nowPlayingMonitor = NowPlayingMonitor(
+            context = this,
+            onUpdate = { info ->
+                receiverSessionSnapshot().forEach { it.updateNowPlaying(info) }
+            },
+            onStatus = ::sendStatusBroadcast,
+        ).also(NowPlayingMonitor::start)
+    }
+
     private fun sendReceiverStateBroadcast(error: String? = null) {
         val intent = Intent(ACTION_RECEIVER_STATE).apply {
             putStringArrayListExtra(
                 EXTRA_ACTIVE_RECEIVERS,
                 ArrayList(receiverSessionAddresses()),
             )
+            putExtra(EXTRA_IS_STREAMING, hasActiveStream())
+            putExtra(EXTRA_CURRENT_VOLUME, currentVolume)
             error?.let { putExtra(EXTRA_RECEIVER_ERROR, it) }
             setPackage(packageName)
         }
@@ -435,6 +490,8 @@ class AudioCaptureService : Service() {
     }
 
     private fun stopCapture() {
+        nowPlayingMonitor?.close()
+        nowPlayingMonitor = null
         val capture = audioCapture
         captureStarted = false
         val sessions = synchronized(receiverSessionLock) {
@@ -442,6 +499,7 @@ class AudioCaptureService : Service() {
         }
         audioCapture = null
         capture?.stop()
+        sendReceiverStateBroadcast()
         scope.launch {
             sessions.forEach { it.stop() }
         }
@@ -497,6 +555,10 @@ class AudioCaptureService : Service() {
             airPlay2?.setVolume(volume)
         }
 
+        fun updateNowPlaying(info: NowPlayingInfo?) {
+            airPlay2?.updateNowPlaying(info)
+        }
+
         fun stop() {
             airPlay1?.stop()
             airPlay2?.stop()
@@ -505,10 +567,15 @@ class AudioCaptureService : Service() {
 
     companion object {
         const val ACTION_RECEIVER_STATE = "com.egron.lampan.RECEIVER_STATE"
+        const val ACTION_QUERY_STATE = "com.egron.lampan.QUERY_STREAM_STATE"
+        const val ACTION_REFRESH_NOW_PLAYING = "com.egron.lampan.REFRESH_NOW_PLAYING"
         const val EXTRA_ACTIVE_RECEIVERS = "ACTIVE_RECEIVERS"
         const val EXTRA_RECEIVER_ERROR = "RECEIVER_ERROR"
+        const val EXTRA_IS_STREAMING = "IS_STREAMING"
+        const val EXTRA_CURRENT_VOLUME = "CURRENT_VOLUME"
 
         const val GROUP_START_DELAY_MS = 250L
+        private const val DEFAULT_INITIAL_VOLUME = 0.5f
         private const val DEFAULT_TRANSIENT_PASSWORD = "3939"
     }
 }

@@ -1,5 +1,6 @@
 package com.egron.lampan.raop
 
+import com.egron.lampan.NowPlayingInfo
 import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSArray
 import com.dd.plist.NSData
@@ -36,9 +37,12 @@ class AirPlay2Session(
     private val sessionIdUnsigned = sessionId.toLong() and 0xFFFF_FFFFL
     private val sessionUuid = UUID.randomUUID().toString().uppercase()
     private var sequence = random.nextInt(0x1_0000)
-    private var rtpTimestamp = RENDER_LATENCY_FRAMES.toLong()
+    @Volatile private var rtpTimestamp = RENDER_LATENCY_FRAMES.toLong()
     private var packetCount = 0L
-    private var metadataSent = false
+    private val metadataLock = Any()
+    private var lastMetadataKey: String? = null
+    private var lastArtworkHash: Int? = null
+    private var lastProgressKey: String? = null
     private var firstSyncSent = false
     private val syncTimeline = RtpNtpTimeline()
     private var pendingPcm = ByteArray(0)
@@ -320,7 +324,55 @@ class AirPlay2Session(
 
     /** Sonos-class receivers may acknowledge audio SETUP but wait for a track announcement. */
     private fun sendInitialMetadata(connected: AirPlay2Connection) {
-        if (metadataSent) return
+        synchronized(metadataLock) {
+            sendNowPlaying(connected, info = null)
+        }
+    }
+
+    /** Mirror Android's active media-session information to the receiver. */
+    fun updateNowPlaying(info: NowPlayingInfo?) {
+        val connected = connection ?: return
+        if (!running) return
+        synchronized(metadataLock) {
+            sendNowPlaying(connected, info)
+        }
+    }
+
+    private fun sendNowPlaying(
+        connected: AirPlay2Connection,
+        info: NowPlayingInfo?,
+    ) {
+        val title = info?.title?.takeIf(String::isNotBlank) ?: "Lampan"
+        val artist = info?.artist.orEmpty()
+        val album = info?.album.orEmpty()
+        val metadataKey = "$title\u0000$artist\u0000$album"
+        val trackChanged = metadataKey != lastMetadataKey
+        if (trackChanged) {
+            sendDmapMetadata(connected, title, artist, album, metadataKey)
+        }
+
+        val artwork = info?.artworkJpeg
+        val artworkHash = artwork?.contentHashCode()
+        if (artwork != null && (trackChanged || artworkHash != lastArtworkHash)) {
+            sendArtwork(connected, artwork, artworkHash)
+        } else if (trackChanged && artwork == null) {
+            lastArtworkHash = null
+        }
+
+        val position = info?.positionMs
+        val duration = info?.durationMs
+        if (position != null && duration != null && duration > 0L) {
+            sendProgress(connected, position, duration)
+        }
+    }
+
+    private fun sendDmapMetadata(
+        connected: AirPlay2Connection,
+        title: String,
+        artist: String,
+        album: String,
+        metadataKey: String,
+    ) {
         val response = connected.client.sendRequest(
             "SET_PARAMETER",
             sessionUri(connected.client.getLocalAddress()?.hostAddress ?: return),
@@ -328,14 +380,66 @@ class AirPlay2Session(
                 "Content-Type" to "application/x-dmap-tagged",
                 "RTP-Info" to "rtptime=$rtpTimestamp",
             ),
-            rawBody = buildAirPlayDmapMetadata(title = "Lampan"),
+            rawBody = buildAirPlayDmapMetadata(
+                title = title,
+                artist = artist,
+                album = album,
+            ),
             logExchange = false,
         )
         if (response.code in 200..299) {
-            metadataSent = true
-            log("[AP2] Initial track metadata accepted")
+            lastMetadataKey = metadataKey
+            log(
+                buildString {
+                    append("[AP2] Now-playing metadata accepted: ")
+                    append(title)
+                    if (artist.isNotEmpty()) append(" — $artist")
+                },
+            )
         } else {
-            log("[AP2] Initial track metadata returned RTSP ${response.code}")
+            log("[AP2] Now-playing metadata returned RTSP ${response.code}")
+        }
+    }
+
+    private fun sendArtwork(
+        connected: AirPlay2Connection,
+        artwork: ByteArray,
+        artworkHash: Int?,
+    ) {
+        val response = connected.client.sendRequest(
+            "SET_PARAMETER",
+            sessionUri(connected.client.getLocalAddress()?.hostAddress ?: return),
+            connected.headers + mapOf(
+                "Content-Type" to "image/jpeg",
+                "RTP-Info" to "rtptime=$rtpTimestamp",
+            ),
+            rawBody = artwork,
+            logExchange = false,
+        )
+        if (response.code in 200..299) {
+            lastArtworkHash = artworkHash
+            log("[AP2] Cover artwork accepted (${artwork.size} bytes)")
+        } else {
+            log("[AP2] Cover artwork returned RTSP ${response.code}")
+        }
+    }
+
+    private fun sendProgress(
+        connected: AirPlay2Connection,
+        positionMs: Long,
+        durationMs: Long,
+    ) {
+        val progress = buildAirPlayProgress(rtpTimestamp, positionMs, durationMs)
+        if (progress == lastProgressKey) return
+        val response = connected.client.sendRequest(
+            "SET_PARAMETER",
+            sessionUri(connected.client.getLocalAddress()?.hostAddress ?: return),
+            connected.headers + ("Content-Type" to "text/parameters"),
+            body = "progress: $progress\r\n",
+            logExchange = false,
+        )
+        if (response.code in 200..299) {
+            lastProgressKey = progress
         }
     }
 
@@ -370,7 +474,11 @@ class AirPlay2Session(
         serverDataPort = -1
         serverControlPort = -1
         pendingPcm = ByteArray(0)
-        metadataSent = false
+        synchronized(metadataLock) {
+            lastMetadataKey = null
+            lastArtworkHash = null
+            lastProgressKey = null
+        }
         firstSyncSent = false
         syncTimeline.reset()
         log("[AP2] Session closed")
@@ -609,4 +717,22 @@ private fun dmapAtom(tag: String, value: ByteArray): ByteArray {
         putInt(value.size)
         put(value)
     }.array()
+}
+
+internal fun buildAirPlayProgress(
+    rtpTimestamp: Long,
+    positionMs: Long,
+    durationMs: Long,
+    sampleRate: Long = 44_100L,
+): String {
+    require(positionMs >= 0L) { "Playback position cannot be negative" }
+    require(durationMs > 0L) { "Playback duration must be positive" }
+    require(sampleRate > 0L) { "Sample rate must be positive" }
+    val mask = 0xFFFF_FFFFL
+    val current = rtpTimestamp and mask
+    val positionFrames = positionMs * sampleRate / 1_000L
+    val durationFrames = durationMs * sampleRate / 1_000L
+    val start = (current - positionFrames) and mask
+    val end = (start + durationFrames) and mask
+    return "$start/$current/$end"
 }
