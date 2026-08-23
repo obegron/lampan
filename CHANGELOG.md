@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.2
+
+- Allow experimental groups containing AirPlay 1, AirPlay 2, or a mix of both.
+- Map each receiver's independent RTP counter to one future NTP start anchor.
+- Preserve that RTP-to-NTP mapping in periodic sync packets instead of losing
+  the scheduled group offset after the first sync interval.
+
 ## v0.4.1
 
 - Sign GitHub release APKs with one backed-up, long-lived Lampan release key

@@ -122,7 +122,7 @@ class AudioCaptureService : Service() {
             val requestedReceivers = receiverAddresses.ifEmpty { listOf(receiver) }.distinct()
             sendStatusBroadcast(
                 if (requestedReceivers.size > 1) {
-                    "Connecting to ${requestedReceivers.size} receivers with synchronized AirPlay 2..."
+                    "Connecting to ${requestedReceivers.size} synchronized AirPlay receivers..."
                 } else {
                     "Connecting to $receiver with " +
                         "${if (useAirPlay2) "AirPlay 2" else "AirPlay 1"}..."
@@ -155,12 +155,6 @@ class AudioCaptureService : Service() {
                         ) ?: DEFAULT_TRANSIENT_PASSWORD.takeIf { targetUsesAirPlay2 },
                 )
             }
-            if (targets.size > 1 && targets.any { !it.useAirPlay2 }) {
-                throw IllegalArgumentException(
-                    "Synchronized multi-receiver streaming currently requires AirPlay 2 on every receiver",
-                )
-            }
-
             val preparedAirPlay2 = targets.filter(ReceiverTarget::useAirPlay2).map { target ->
                 val sessionLog: (String) -> Unit = if (targets.size > 1) {
                     { message -> sendStatusBroadcast("[${target.name}] $message") }
@@ -195,7 +189,12 @@ class AudioCaptureService : Service() {
                 )
             }
             val preparedAirPlay1 = targets.filterNot(ReceiverTarget::useAirPlay2).map { target ->
-                target to RaopSession(target.host, target.port, ::sendStatusBroadcast)
+                val sessionLog: (String) -> Unit = if (targets.size > 1) {
+                    { message -> sendStatusBroadcast("[${target.name}] $message") }
+                } else {
+                    ::sendStatusBroadcast
+                }
+                target to RaopSession(target.host, target.port, sessionLog)
             }
             airPlay2Sessions = preparedAirPlay2.map { it.second }
             raopSessions = preparedAirPlay1.map { it.second }
@@ -210,7 +209,7 @@ class AudioCaptureService : Service() {
             
             scope.launch {
                 try {
-                    val synchronizedGroup = preparedAirPlay2.size > 1
+                    val synchronizedGroup = targets.size > 1
                     preparedAirPlay2.forEach { (target, session) ->
                         try {
                             session.connect(
@@ -233,8 +232,18 @@ class AudioCaptureService : Service() {
                         preparedAirPlay2.forEach { (_, session) ->
                             session.synchronizeAt(sharedStartMillis)
                         }
+                        preparedAirPlay1.forEach { (_, session) ->
+                            session.synchronizeAt(sharedStartMillis)
+                        }
+                        val protocolLabel = when {
+                            preparedAirPlay1.isNotEmpty() && preparedAirPlay2.isNotEmpty() ->
+                                "AirPlay 1 + 2"
+                            preparedAirPlay2.isNotEmpty() -> "AirPlay 2"
+                            else -> "AirPlay 1"
+                        }
                         sendStatusBroadcast(
-                            "[AP2] ${preparedAirPlay2.size} receivers share one RTP/NTP timeline",
+                            "[Group] ${targets.size} receivers share one RTP/NTP timeline " +
+                                "($protocolLabel)",
                         )
                     }
                     sendStatusBroadcast("Connected. Starting capture...")

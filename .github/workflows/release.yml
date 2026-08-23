@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      LAMPAN_RELEASE_STORE_FILE: ${{ runner.temp }}/lampan-release.p12
+      LAMPAN_RELEASE_STORE_FILE: /tmp/lampan-release.p12
       LAMPAN_RELEASE_STORE_PASSWORD: ${{ secrets.LAMPAN_RELEASE_STORE_PASSWORD }}
       LAMPAN_RELEASE_CERT_SHA256: bc05793e78944f3bfbd7df3ba11ddaab066b4682dd9c0cd504dcccb63568eddb
     steps:

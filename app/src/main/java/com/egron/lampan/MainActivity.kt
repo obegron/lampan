@@ -641,27 +641,13 @@ fun MainScreen(
                                         updateIpAddress(preferredReceiverAddress(next))
                                     }
                                 } else if (!alreadySelected) {
-                                    val selectedDevices = knownDevices.filter {
-                                        preferredReceiverAddress(it) in selectedReceiverAddresses
-                                    }
-                                    if (
-                                        selectedReceiverAddresses.isNotEmpty() &&
-                                        (device.preferredProtocol != AirPlayProtocol.AIRPLAY_2 ||
-                                            selectedDevices.any {
-                                                it.preferredProtocol != AirPlayProtocol.AIRPLAY_2
-                                            })
-                                    ) {
-                                        errorMessage =
-                                            "Multiple receivers currently require AirPlay 2 on every device"
-                                    } else {
-                                        selectedReceiverAddresses =
-                                            selectedReceiverAddresses + deviceAddress
-                                        selectedDevice = device
-                                        receiverProtocol = protocol
-                                        isAddingDevice = false
-                                        isScanning = false
-                                        updateIpAddress("${device.ip}:$port")
-                                    }
+                                    selectedReceiverAddresses =
+                                        selectedReceiverAddresses + deviceAddress
+                                    selectedDevice = device
+                                    receiverProtocol = protocol
+                                    isAddingDevice = false
+                                    isScanning = false
+                                    updateIpAddress("${device.ip}:$port")
                                 } else {
                                     selectedDevice = device
                                     receiverProtocol = protocol
@@ -767,8 +753,9 @@ fun MainScreen(
                 if (selectedDevice != null) {
                     Text(
                         text = if (selectedReceiverAddresses.size > 1) {
-                            "${selectedReceiverAddresses.size} AirPlay 2 receivers selected; " +
-                                "Lampan will use one shared RTP/NTP timeline."
+                            "${selectedReceiverAddresses.size} receivers selected; Lampan will " +
+                                "map their AirPlay 1 and AirPlay 2 RTP streams to one shared " +
+                                "network-time start."
                         } else {
                             "${selectedDevice?.protocolLabel} capabilities remembered; " +
                                 "Lampan will use " +
@@ -1019,6 +1006,7 @@ fun MainScreen(
                                 knownDevices.firstOrNull { device ->
                                     val address = preferredReceiverAddress(device)
                                     address in selectedReceiverAddresses &&
+                                        device.preferredProtocol == AirPlayProtocol.AIRPLAY_2 &&
                                         device.airPlay2RequiresPassword != false &&
                                         !airPlay2CredentialStore.contains(address) &&
                                         !airPlay2CredentialStore.containsPassword(address) &&

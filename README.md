@@ -15,7 +15,7 @@ Lampan solves this by capturing internal audio and streaming it via the AirPlay 
 *   **Native AirPlay 2 Audio:** Pair with password-protected receivers, automatically try standard passwordless transient setup, securely remember successfully authenticated passwords or pairing credentials, and stream encrypted realtime ALAC audio.
 *   **Device Discovery:** Scans both AirPlay 1 and AirPlay 2 services, merges records belonging to the same receiver, and uses AirPlay 1 by default when both are available. The per-device choice can be changed to AirPlay 2 and is remembered.
 *   **Known Receivers:** Remembers multiple receiver capabilities and verifies saved addresses with a quiet AirPlay `GET /info` identity check.
-*   **Synchronized AirPlay 2 Groups (Experimental):** Select multiple known AirPlay 2 receivers to share one capture stream and RTP/NTP start timeline.
+*   **Synchronized Receiver Groups (Experimental):** Select multiple known receivers—including a mix of AirPlay 1 and AirPlay 2—to share one capture stream and RTP/NTP start timeline.
 *   **Volume Control:** Adjust the speaker volume directly from the app.
 *   **Background Service:** Keeps streaming even when you switch apps or lock the screen.
 
@@ -40,7 +40,7 @@ For a discovered AirPlay 2 receiver, select the device, enter its password when 
 *   **Latency:** due to the nature of AirPlay 1 buffering, there is a delay (typically 2 seconds). This makes it perfect for music, podcasts, and audiobooks, but it is **not suitable for real-time gaming** or lip-synced video watching.
 *   **DRM:** Some apps (like Netflix or banking apps) block screen/audio capture for security reasons. Lampan cannot stream audio from these apps.
 *   **AirPlay 2 compatibility:** Native audio currently uses the realtime ALAC/NTP path. Receivers requiring PTP cannot use that path from an ordinary Android app because PTP requires privileged UDP ports 319/320; dual-protocol receivers such as Sonos/Symfonisk therefore default to AirPlay 1.
-*   **Multiple receivers:** Simultaneous AirPlay 2 sessions share the sender timeline, but different receiver buffering may still cause an offset. An audible test is needed before treating this as sample-accurate multiroom playback. Mixing AirPlay 1 and AirPlay 2 in one group is intentionally blocked.
+*   **Multiple receivers:** AirPlay 1 and AirPlay 2 sessions can share the sender timeline, but different receiver buffering may still create a fixed output offset. Mixed groups remain experimental until verified audibly on the target receivers.
 
 ## Requirements
 

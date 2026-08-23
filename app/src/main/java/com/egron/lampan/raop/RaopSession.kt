@@ -45,6 +45,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     private var ssrc = 0
     private var packetCount = 0L
     private var firstSyncSent = false
+    private val syncTimeline = RtpNtpTimeline()
     @Volatile private var timingRequestsReceived = 0
     private val encoder = AlacEncoder()
     private val random = Random() 
@@ -89,6 +90,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         ssrc = 0
         packetCount = 0
         firstSyncSent = false
+        syncTimeline.reset()
         timingRequestsReceived = 0
         
         if (clientInstance == null) { 
@@ -308,11 +310,10 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         }
     }
     
-    private fun ntpTime(): Long {
+    private fun ntpTime(millis: Long = System.currentTimeMillis()): Long {
         val offset = 2208988800L
-        val now = System.currentTimeMillis()
-        val seconds = (now / 1000) + offset
-        val fraction = ((now % 1000) * 4294967296L / 1000)
+        val seconds = (millis / 1000) + offset
+        val fraction = ((millis % 1000) * 4294967296L / 1000)
         return (seconds shl 32) or fraction
     }
     
@@ -325,7 +326,12 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     }
 
     // Send UDP Sync Packet (Type 84) to Control Port
-    private fun sendSyncPacket(first: Boolean) {
+    private fun sendSyncPacket(
+        first: Boolean,
+        ntpTimestamp: Long = ntpTime(
+            syncTimeline.unixTimeAt(rtpTimestamp, System.currentTimeMillis()),
+        ),
+    ) {
         if (serverControlPort == -1 || clientControlSocket == null || serverAddress == null) {
             log("Skipping Sync Packet: serverControlPort=$serverControlPort, socket=${clientControlSocket != null}, address=$serverAddress")
             return
@@ -352,8 +358,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             // NTP (8 bytes) + RTP (4 bytes)
             
             // NTP Timestamp (Current wall clock)
-            val nowNtp = ntpTime()
-            buffer.putLong(nowNtp)
+            buffer.putLong(ntpTimestamp)
             
             // RTP Timestamp (Current stream time)
             buffer.putInt(rtpTimestamp.toInt())
@@ -374,6 +379,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         try {
             // Send Sync packet on first frame (if not sent yet) and periodically
             if (!firstSyncSent) {
+                syncTimeline.synchronizeAt(rtpTimestamp, System.currentTimeMillis())
                 sendSyncPacket(true)
                 firstSyncSent = true
             } else if (packetCount > 0 && packetCount % 125L == 0L) {
@@ -405,6 +411,17 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         } catch (e: Exception) {
             log("Send error: ${e.message}")
         }
+    }
+
+    /** Map the next audio sample to the same network time as other sessions. */
+    fun synchronizeAt(unixTimeMillis: Long) {
+        check(serverControlPort in 1..0xFFFF && clientControlSocket != null) {
+            "AirPlay 1 session must be connected before synchronization"
+        }
+        syncTimeline.synchronizeAt(rtpTimestamp, unixTimeMillis)
+        sendSyncPacket(first = !firstSyncSent, ntpTimestamp = ntpTime(unixTimeMillis))
+        firstSyncSent = true
+        log("RaopSession: Shared start scheduled for $unixTimeMillis at RTP $rtpTimestamp")
     }
 
     fun setVolume(vol: Float) {

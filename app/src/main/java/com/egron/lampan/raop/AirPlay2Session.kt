@@ -39,6 +39,8 @@ class AirPlay2Session(
     private var rtpTimestamp = RENDER_LATENCY_FRAMES.toLong()
     private var packetCount = 0L
     private var metadataSent = false
+    private var firstSyncSent = false
+    private val syncTimeline = RtpNtpTimeline()
     private var pendingPcm = ByteArray(0)
     private var connection: AirPlay2Connection? = null
     private var audioCipher: AirPlay2AudioPacketCipher? = null
@@ -58,6 +60,8 @@ class AirPlay2Session(
         synchronizeImmediately: Boolean = true,
     ) {
         check(connection == null) { "AirPlay 2 session is already connected" }
+        syncTimeline.reset()
+        firstSyncSent = false
         serverAddress = InetAddress.getByName(host)
         timingSocket = datagramSocket()
         controlSocket = datagramSocket()
@@ -113,8 +117,7 @@ class AirPlay2Session(
             startFeedbackWorker(connected)
             setVolume(initialVolume)
             if (synchronizeImmediately) {
-                sendSyncPacket(first = true)
-                sendInitialMetadata(connected)
+                synchronizeAt(System.currentTimeMillis())
             }
             log("[AP2] Native realtime audio session ready; starting phone capture")
         } catch (error: Exception) {
@@ -309,7 +312,9 @@ class AirPlay2Session(
         check(running && serverControlPort in 1..0xFFFF) {
             "AirPlay 2 session must be connected before synchronization"
         }
-        sendSyncPacket(first = true, ntpTimestamp = ntpTime(unixTimeMillis))
+        syncTimeline.synchronizeAt(rtpTimestamp, unixTimeMillis)
+        sendSyncPacket(first = !firstSyncSent, ntpTimestamp = ntpTime(unixTimeMillis))
+        firstSyncSent = true
         connection?.let(::sendInitialMetadata)
     }
 
@@ -366,6 +371,8 @@ class AirPlay2Session(
         serverControlPort = -1
         pendingPcm = ByteArray(0)
         metadataSent = false
+        firstSyncSent = false
+        syncTimeline.reset()
         log("[AP2] Session closed")
     }
 
@@ -437,7 +444,9 @@ class AirPlay2Session(
 
     private fun sendSyncPacket(
         first: Boolean,
-        ntpTimestamp: Long = ntpTime(),
+        ntpTimestamp: Long = ntpTime(
+            syncTimeline.unixTimeAt(rtpTimestamp, System.currentTimeMillis()),
+        ),
     ) {
         if (serverControlPort !in 1..0xFFFF) return
         try {
