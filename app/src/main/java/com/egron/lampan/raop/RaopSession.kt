@@ -25,7 +25,12 @@ import kotlinx.coroutines.launch
 
 class RaopSession(private var host: String, private val port: Int = 7000, private val logCallback: ((String) -> Unit)? = null) {
     private val TAG = "RaopSession"
-    private val client = RtspClient(host, port, logCallback = logCallback)
+    private val client = RtspClient(
+        host,
+        port,
+        logBinaryBodies = false,
+        logCallback = logCallback,
+    )
     private var sessionId: String? = null
     private var clientInstance: String? = null
     private var activeRemote: String? = null
@@ -402,6 +407,14 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             if (serverAddress != null) {
                 val dp = DatagramPacket(packetBytes, packetBytes.size, serverAddress!!, serverAudioPort)
                 clientAudioSocket?.send(dp)
+            }
+
+            if (packetCount == STARTUP_SILENCE_PACKETS.toLong()) {
+                log(
+                    "RaopSession: First captured-audio RTP packet sent " +
+                        "(${packetBytes.size} bytes to ${serverAddress?.hostAddress}:" +
+                        "$serverAudioPort, timing requests=$timingRequestsReceived)",
+                )
             }
             
             rtpSeqNum = (rtpSeqNum + 1) % 65536

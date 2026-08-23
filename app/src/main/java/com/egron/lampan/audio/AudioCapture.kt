@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 class AudioCapture(
     private val mediaProjection: MediaProjection,
@@ -84,6 +85,8 @@ class AudioCapture(
             captureJob = scope.launch {
                 val buffer = ByteArray(352 * 4) 
                 var packetsRead = 0
+                var capturedSignal = false
+                var silenceWarningLogged = false
                 
                 onStatus("AudioCapture: Entering read loop...")
                 
@@ -91,10 +94,31 @@ class AudioCapture(
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (read > 0) {
                         val data = buffer.copyOfRange(0, read)
+                        val peak = pcm16LittleEndianPeak(data)
                         onAudioData(data)
                         packetsRead++
                         if (packetsRead == 1) {
-                            onStatus("AudioCapture: First audio data captured ($read bytes)")
+                            onStatus(
+                                "AudioCapture: First audio data captured " +
+                                    "($read bytes, PCM peak=$peak)",
+                            )
+                        }
+                        if (!capturedSignal && peak > SILENCE_PEAK_THRESHOLD) {
+                            capturedSignal = true
+                            onStatus(
+                                "AudioCapture: Non-silent PCM confirmed " +
+                                    "(packet $packetsRead, peak=$peak)",
+                            )
+                        } else if (
+                            !capturedSignal &&
+                            !silenceWarningLogged &&
+                            packetsRead >= SILENCE_WARNING_PACKETS
+                        ) {
+                            silenceWarningLogged = true
+                            onStatus(
+                                "AudioCapture: Captured PCM is still silent; check the " +
+                                    "app or screen selected in Android's sharing prompt",
+                            )
                         }
                         if (packetsRead % 100 == 0) {
                              Log.d("AudioCapture", "Captured $packetsRead frames")
@@ -160,4 +184,23 @@ class AudioCapture(
             mediaProjectionCallback = null
         }
     }
+
+    private companion object {
+        const val SILENCE_PEAK_THRESHOLD = 8
+        const val SILENCE_WARNING_PACKETS = 125
+    }
+}
+
+internal fun pcm16LittleEndianPeak(data: ByteArray): Int {
+    var peak = 0
+    var offset = 0
+    while (offset + 1 < data.size) {
+        val sample = (
+            (data[offset].toInt() and 0xFF) or
+                (data[offset + 1].toInt() shl 8)
+            ).toShort().toInt()
+        peak = maxOf(peak, abs(sample))
+        offset += 2
+    }
+    return peak
 }
