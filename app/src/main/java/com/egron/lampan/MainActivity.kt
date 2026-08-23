@@ -257,6 +257,9 @@ fun MainScreen(
         mutableStateOf(emptyMap<String, ReceiverReachability>())
     }
     var airPlay2Password by remember { mutableStateOf("") }
+    var airPlay2PasswordDrafts by remember {
+        mutableStateOf(emptyMap<String, String>())
+    }
     var hasSavedAirPlay2Pairing by remember { mutableStateOf(false) }
     var hasSavedAirPlay2Password by remember { mutableStateOf(false) }
     var confirmForgetAirPlay2Pairing by remember { mutableStateOf(false) }
@@ -318,10 +321,11 @@ fun MainScreen(
                 }
                 hasSavedAirPlay2Pairing = hasPairing
                 hasSavedAirPlay2Password = savedPassword != null
-                airPlay2Password = savedPassword.orEmpty()
+                airPlay2Password = airPlay2PasswordDrafts[receiver]
+                    ?: savedPassword.orEmpty()
             } catch (error: AirPlay2CredentialStoreException) {
                 hasSavedAirPlay2Password = false
-                airPlay2Password = ""
+                airPlay2Password = airPlay2PasswordDrafts[receiver].orEmpty()
                 appendLog("[AP2] ${error.message}")
             }
         }
@@ -491,6 +495,7 @@ fun MainScreen(
                         hasSavedAirPlay2Pairing = false
                         hasSavedAirPlay2Password = false
                         airPlay2Password = ""
+                        airPlay2PasswordDrafts = airPlay2PasswordDrafts - receiver
                         confirmForgetAirPlay2Pairing = false
                         appendLog("[AP2] Saved AirPlay 2 access removed from this phone")
                     },
@@ -884,7 +889,14 @@ fun MainScreen(
                     } else if (needsPassword) {
                         OutlinedTextField(
                             value = airPlay2Password,
-                            onValueChange = { airPlay2Password = it },
+                            onValueChange = { password ->
+                                airPlay2Password = password
+                                val receiver = normalizedReceiverAddress(ipAddress)
+                                if (receiver.isNotEmpty()) {
+                                    airPlay2PasswordDrafts =
+                                        airPlay2PasswordDrafts + (receiver to password)
+                                }
+                            },
                             label = { Text("AirPlay password or setup code") },
                             supportingText = {
                                 Text(
