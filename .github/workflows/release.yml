@@ -11,6 +11,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      LAMPAN_RELEASE_STORE_FILE: ${{ runner.temp }}/lampan-release.p12
+      LAMPAN_RELEASE_STORE_PASSWORD: ${{ secrets.LAMPAN_RELEASE_STORE_PASSWORD }}
+      LAMPAN_RELEASE_CERT_SHA256: bc05793e78944f3bfbd7df3ba11ddaab066b4682dd9c0cd504dcccb63568eddb
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,12 +28,30 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Restore release signing key
+        env:
+          LAMPAN_RELEASE_KEYSTORE_BASE64: ${{ secrets.LAMPAN_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$LAMPAN_RELEASE_KEYSTORE_BASE64"
+          test -n "$LAMPAN_RELEASE_STORE_PASSWORD"
+          printf '%s' "$LAMPAN_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$LAMPAN_RELEASE_STORE_FILE"
+          chmod 600 "$LAMPAN_RELEASE_STORE_FILE"
+
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      # Note: The APK produced here will be unsigned (or signed with debug key if configured).
-      # To sign the APK for production, you would typically use a signing step here
-      # involving secrets for the keystore and passwords.
+      - name: Verify release signature
+        run: |
+          apksigner_path=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
+          test -n "$apksigner_path"
+          apk=app/build/outputs/apk/release/app-release.apk
+          "$apksigner_path" verify --verbose "$apk"
+          actual=$(
+            "$apksigner_path" verify --print-certs "$apk" |
+              sed -nE 's/^.*certificate SHA-256 digest: ([0-9a-f]+)$/\1/p' |
+              head -n 1
+          )
+          test "$actual" = "$LAMPAN_RELEASE_CERT_SHA256"
 
       - name: Rename APK
         run: mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/lampan-${{ github.ref_name }}.apk
@@ -40,3 +62,7 @@ jobs:
         with:
           files: app/build/outputs/apk/release/lampan-${{ github.ref_name }}.apk
           generate_release_notes: true
+
+      - name: Remove release signing key
+        if: always()
+        run: rm -f "$LAMPAN_RELEASE_STORE_FILE"

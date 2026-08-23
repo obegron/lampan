@@ -3,6 +3,15 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val releaseStoreFile = System.getenv("LAMPAN_RELEASE_STORE_FILE")
+val releaseStorePassword = System.getenv("LAMPAN_RELEASE_STORE_PASSWORD")
+val releaseSigningValues = listOf(releaseStoreFile, releaseStorePassword)
+if (releaseSigningValues.any { !it.isNullOrBlank() } &&
+    releaseSigningValues.any { it.isNullOrBlank() }
+) {
+    throw GradleException("Lampan release signing configuration is incomplete")
+}
+
 android {
     namespace = "com.egron.lampan"
     compileSdk = 36
@@ -12,8 +21,8 @@ android {
         applicationId = "com.egron.lampan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.4.0"
+        versionCode = 16
+        versionName = "0.4.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -21,11 +30,22 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseStoreFile != null && releaseStorePassword != null) {
+            create("lampanRelease") {
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = "lampan"
+                keyPassword = releaseStorePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("lampanRelease")
         }
     }
     compileOptions {

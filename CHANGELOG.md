@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.1
+
+- Sign GitHub release APKs with one backed-up, long-lived Lampan release key
+  instead of the temporary debug key created by each GitHub Actions runner.
+- Verify the expected signing-certificate fingerprint before publishing the APK.
+- Require one final reinstall for v0.4.1; later releases will install as normal
+  updates because they retain the same signing identity.
+
 ## v0.4.0
 
 - Add native AirPlay 2 audio streaming alongside the existing AirPlay 1 path.
