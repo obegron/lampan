@@ -252,6 +252,7 @@ fun MainScreen(
     var selectedReceiverAddresses by remember {
         mutableStateOf(initialDevice?.let(::preferredReceiverAddress)?.let(::setOf).orEmpty())
     }
+    var pendingReceiverAddresses by remember { mutableStateOf(emptySet<String>()) }
     var isAddingDevice by remember { mutableStateOf(initialDevice == null) }
     var receiverReachabilityByAddress by remember {
         mutableStateOf(emptyMap<String, ReceiverReachability>())
@@ -443,12 +444,34 @@ fun MainScreen(
                         }
                         statusLogs = (statusLogs + status).takeLast(100)
                     }
+                } else if (intent?.action == AudioCaptureService.ACTION_RECEIVER_STATE) {
+                    val active = intent.getStringArrayListExtra(
+                        AudioCaptureService.EXTRA_ACTIVE_RECEIVERS,
+                    ).orEmpty().toSet()
+                    val receiverError = intent.getStringExtra(
+                        AudioCaptureService.EXTRA_RECEIVER_ERROR,
+                    )
+                    selectedReceiverAddresses = active
+                    pendingReceiverAddresses = emptySet()
+                    receiverError?.let { errorMessage = it }
+
+                    val focusedAddress = selectedDevice?.let(::preferredReceiverAddress)
+                    if (active.isNotEmpty() && focusedAddress !in active) {
+                        knownDevices.firstOrNull {
+                            preferredReceiverAddress(it) in active
+                        }?.let { next ->
+                            selectedDevice = next
+                            receiverProtocol = next.preferredProtocol
+                            updateIpAddress(preferredReceiverAddress(next))
+                        }
+                    }
                 }
             }
         }
         val filter = IntentFilter().apply {
             addAction("com.egron.lampan.ERROR")
             addAction("com.egron.lampan.STATUS")
+            addAction(AudioCaptureService.ACTION_RECEIVER_STATE)
         }
         ContextCompat.registerReceiver(
             context,
@@ -628,31 +651,64 @@ fun MainScreen(
                             DeviceRow(
                                 device = device,
                                 selected = deviceAddress in selectedReceiverAddresses &&
-                                    !isAddingDevice,
-                                status = receiverReachabilityByAddress[deviceAddress],
+                                    (!isAddingDevice || isConnected),
+                                status = if (deviceAddress in pendingReceiverAddresses) {
+                                    ReceiverReachability.CHECKING
+                                } else {
+                                    receiverReachabilityByAddress[deviceAddress]
+                                },
                             ) {
                                 val protocol = device.preferredProtocol
                                 val port = requireNotNull(device.portFor(protocol))
                                 val alreadySelected = deviceAddress in selectedReceiverAddresses
                                 if (alreadySelected && selectedReceiverAddresses.size > 1) {
-                                    val remaining = selectedReceiverAddresses - deviceAddress
-                                    selectedReceiverAddresses = remaining
-                                    val next = knownDevices.firstOrNull {
-                                        preferredReceiverAddress(it) in remaining
-                                    }
-                                    if (next != null) {
-                                        selectedDevice = next
-                                        receiverProtocol = next.preferredProtocol
-                                        updateIpAddress(preferredReceiverAddress(next))
+                                    if (isConnected) {
+                                        if (pendingReceiverAddresses.isEmpty()) {
+                                            pendingReceiverAddresses = setOf(deviceAddress)
+                                            removeReceiverFromStream(context, deviceAddress)
+                                        }
+                                    } else {
+                                        val remaining = selectedReceiverAddresses - deviceAddress
+                                        selectedReceiverAddresses = remaining
+                                        val next = knownDevices.firstOrNull {
+                                            preferredReceiverAddress(it) in remaining
+                                        }
+                                        if (next != null) {
+                                            selectedDevice = next
+                                            receiverProtocol = next.preferredProtocol
+                                            updateIpAddress(preferredReceiverAddress(next))
+                                        }
                                     }
                                 } else if (!alreadySelected) {
-                                    selectedReceiverAddresses =
-                                        selectedReceiverAddresses + deviceAddress
                                     selectedDevice = device
                                     receiverProtocol = protocol
                                     isAddingDevice = false
                                     isScanning = false
                                     updateIpAddress("${device.ip}:$port")
+                                    if (isConnected) {
+                                        val passwordDraft = airPlay2PasswordDrafts[deviceAddress]
+                                        val missingAccess = protocol == AirPlayProtocol.AIRPLAY_2 &&
+                                            device.airPlay2RequiresPassword != false &&
+                                            !airPlay2CredentialStore.contains(deviceAddress) &&
+                                            !airPlay2CredentialStore.containsPassword(deviceAddress) &&
+                                            passwordDraft.isNullOrEmpty()
+                                        when {
+                                            missingAccess -> errorMessage =
+                                                "Connect to ${device.name} alone once to save its " +
+                                                    "AirPlay 2 password before adding it live"
+                                            pendingReceiverAddresses.isEmpty() -> {
+                                                pendingReceiverAddresses = setOf(deviceAddress)
+                                                addReceiverToStream(
+                                                    context,
+                                                    deviceAddress,
+                                                    passwordDraft,
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        selectedReceiverAddresses =
+                                            selectedReceiverAddresses + deviceAddress
+                                    }
                                 } else {
                                     selectedDevice = device
                                     receiverProtocol = protocol
@@ -985,10 +1041,12 @@ fun MainScreen(
                     OutlinedButton(
                         onClick = {
                             if (!isAddingDevice && knownDevices.isNotEmpty()) {
-                                selectedDevice = null
-                                selectedReceiverAddresses = emptySet()
-                                receiverProtocol = AirPlayProtocol.AIRPLAY_1
-                                ipAddress = ""
+                                if (!isConnected) {
+                                    selectedDevice = null
+                                    selectedReceiverAddresses = emptySet()
+                                    receiverProtocol = AirPlayProtocol.AIRPLAY_1
+                                    ipAddress = ""
+                                }
                                 isAddingDevice = true
                             } else if (isScanning) {
                                 isScanning = false
@@ -1088,6 +1146,7 @@ fun MainScreen(
                     Button(
                         onClick = {
                             stopService(context)
+                            pendingReceiverAddresses = emptySet()
                             isConnected = false
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -1118,7 +1177,13 @@ fun MainScreen(
                         items(discoveredDevices) { device ->
                             DeviceRow(
                                 device = device,
-                                status = ReceiverReachability.REACHABLE,
+                                status = if (
+                                    preferredReceiverAddress(device) in pendingReceiverAddresses
+                                ) {
+                                    ReceiverReachability.CHECKING
+                                } else {
+                                    ReceiverReachability.REACHABLE
+                                },
                             ) {
                                 val rememberedPreference = knownDevices
                                     .firstOrNull { it.ip == device.ip }
@@ -1132,11 +1197,28 @@ fun MainScreen(
                                 receiverProtocol = protocol
                                 prefsManager.saveAirPlayCapabilities(selected)
                                 knownDevices = prefsManager.getKnownAirPlayDevices()
-                                selectedReceiverAddresses =
-                                    setOf(preferredReceiverAddress(selected))
                                 isAddingDevice = false
                                 updateIpAddress("${selected.ip}:$port")
                                 isScanning = false
+                                val address = preferredReceiverAddress(selected)
+                                if (isConnected) {
+                                    val missingAccess = protocol == AirPlayProtocol.AIRPLAY_2 &&
+                                        selected.airPlay2RequiresPassword != false &&
+                                        !airPlay2CredentialStore.contains(address) &&
+                                        !airPlay2CredentialStore.containsPassword(address)
+                                    when {
+                                        address in selectedReceiverAddresses -> Unit
+                                        missingAccess -> errorMessage =
+                                            "Connect to ${selected.name} alone once to save its " +
+                                                "AirPlay 2 password before adding it live"
+                                        pendingReceiverAddresses.isEmpty() -> {
+                                            pendingReceiverAddresses = setOf(address)
+                                            addReceiverToStream(context, address)
+                                        }
+                                    }
+                                } else {
+                                    selectedReceiverAddresses = setOf(address)
+                                }
                             }
                         }
                     }
@@ -1423,6 +1505,27 @@ fun startService(
 fun stopService(context: Context) {
     val intent = Intent(context, AudioCaptureService::class.java).apply {
         action = "STOP"
+    }
+    context.startService(intent)
+}
+
+private fun addReceiverToStream(
+    context: Context,
+    receiver: String,
+    airPlay2Password: String? = null,
+) {
+    val intent = Intent(context, AudioCaptureService::class.java).apply {
+        action = "ADD_RECEIVER"
+        putExtra("RECEIVER", receiver)
+        airPlay2Password?.let { putExtra("AIRPLAY2_PASSWORD", it) }
+    }
+    context.startService(intent)
+}
+
+private fun removeReceiverFromStream(context: Context, receiver: String) {
+    val intent = Intent(context, AudioCaptureService::class.java).apply {
+        action = "REMOVE_RECEIVER"
+        putExtra("RECEIVER", receiver)
     }
     context.startService(intent)
 }

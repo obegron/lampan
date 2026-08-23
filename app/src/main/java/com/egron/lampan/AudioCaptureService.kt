@@ -18,13 +18,18 @@ import com.egron.lampan.raop.RaopSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class AudioCaptureService : Service() {
 
     private var audioCapture: AudioCapture? = null
-    private var raopSessions = emptyList<RaopSession>()
-    private var airPlay2Sessions = emptyList<AirPlay2Session>()
+    private var receiverSessions = emptyMap<String, ReceiverSession>()
+    private val receiverSessionLock = Any()
+    private val receiverChangeMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
+    @Volatile private var currentVolume = 1.0f
+    @Volatile private var captureStarted = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -72,9 +77,22 @@ class AudioCaptureService : Service() {
             }
             "SET_VOLUME" -> {
                 val vol = intent.getFloatExtra("VOLUME", 1.0f)
+                currentVolume = vol
                 scope.launch {
-                    raopSessions.forEach { it.setVolume(vol) }
-                    airPlay2Sessions.forEach { it.setVolume(vol) }
+                    receiverSessionSnapshot().forEach { it.setVolume(vol) }
+                }
+            }
+            "ADD_RECEIVER" -> {
+                val address = intent.getStringExtra("RECEIVER").orEmpty()
+                val password = intent.getStringExtra("AIRPLAY2_PASSWORD")
+                if (address.isNotEmpty()) {
+                    scope.launch { addReceiver(address, password) }
+                }
+            }
+            "REMOVE_RECEIVER" -> {
+                val address = intent.getStringExtra("RECEIVER").orEmpty()
+                if (address.isNotEmpty()) {
+                    scope.launch { removeReceiver(address) }
                 }
             }
         }
@@ -115,6 +133,8 @@ class AudioCaptureService : Service() {
         receiverAddresses: List<String>,
     ) {
         try {
+            currentVolume = initialVolume
+            captureStarted = false
             val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val mediaProjection = mpManager.getMediaProjection(resultCode, data) ?: throw Exception("MediaProjection denied or null")
 
@@ -132,113 +152,65 @@ class AudioCaptureService : Service() {
             val credentialStore = AirPlay2CredentialStore(this)
             val preferences = PreferencesManager(this)
             val targets = requestedReceivers.map { address ->
-                val (targetHost, targetPort) = parseReceiverAddress(address)
-                val capabilities = preferences.getAirPlayCapabilities(address)
-                val targetUsesAirPlay2 = capabilities?.preferredProtocol == AirPlayProtocol.AIRPLAY_2 ||
-                    (requestedReceivers.size == 1 && capabilities == null && useAirPlay2)
-                ReceiverTarget(
+                buildReceiverTarget(
                     address = address,
-                    host = targetHost,
-                    port = targetPort,
-                    name = capabilities?.name ?: address,
-                    useAirPlay2 = targetUsesAirPlay2,
-                    transient = capabilities?.airPlay2RequiresPassword == false ||
-                        (requestedReceivers.size == 1 &&
-                            capabilities == null &&
-                            useTransientAirPlay2),
-                    password = (
-                        if (address == receiver && !airPlay2Password.isNullOrEmpty()) {
-                            airPlay2Password
-                        } else {
-                            credentialStore.loadPassword(address)
-                        }
-                        ) ?: DEFAULT_TRANSIENT_PASSWORD.takeIf { targetUsesAirPlay2 },
+                    preferences = preferences,
+                    credentialStore = credentialStore,
+                    fallbackUsesAirPlay2 = requestedReceivers.size == 1 &&
+                        capabilitiesMissing(preferences, address) && useAirPlay2,
+                    fallbackTransient = requestedReceivers.size == 1 &&
+                        capabilitiesMissing(preferences, address) && useTransientAirPlay2,
+                    enteredPassword = airPlay2Password.takeIf { address == receiver },
                 )
             }
-            val preparedAirPlay2 = targets.filter(ReceiverTarget::useAirPlay2).map { target ->
-                val sessionLog: (String) -> Unit = if (targets.size > 1) {
-                    { message -> sendStatusBroadcast("[${target.name}] $message") }
-                } else {
-                    ::sendStatusBroadcast
-                }
-                target to AirPlay2Session(
-                    host = target.host,
-                    port = target.port,
-                    credentials = if (target.transient) {
-                        null
-                    } else {
-                        credentialStore.load(target.address)
-                    },
-                    password = target.password,
-                    onCredentialsCreated = { credentials ->
-                        credentialStore.save(target.address, credentials)
-                        sendStatusBroadcast("[AP2] Pairing identity saved")
-                    },
-                    log = sessionLog,
-                    transientPairing = target.transient,
-                    onTransientPasswordAuthenticated = {
-                        if (!target.password.isNullOrEmpty()) {
-                            try {
-                                credentialStore.savePassword(target.address, target.password)
-                                sendStatusBroadcast("[AP2] Receiver password saved securely")
-                            } catch (error: AirPlay2CredentialStoreException) {
-                                sendStatusBroadcast("[AP2] Could not save receiver password: ${error.message}")
-                            }
-                        }
-                    },
+            val preparedSessions = targets.associate { target ->
+                target.address to createReceiverSession(
+                    target = target,
+                    credentialStore = credentialStore,
+                    prefixLogs = targets.size > 1,
                 )
             }
-            val preparedAirPlay1 = targets.filterNot(ReceiverTarget::useAirPlay2).map { target ->
-                val sessionLog: (String) -> Unit = if (targets.size > 1) {
-                    { message -> sendStatusBroadcast("[${target.name}] $message") }
-                } else {
-                    ::sendStatusBroadcast
-                }
-                target to RaopSession(target.host, target.port, sessionLog)
+            synchronized(receiverSessionLock) {
+                receiverSessions = preparedSessions
             }
-            airPlay2Sessions = preparedAirPlay2.map { it.second }
-            raopSessions = preparedAirPlay1.map { it.second }
             
             audioCapture = AudioCapture(mediaProjection, { status -> 
                 sendStatusBroadcast(status)
             }) { pcmData ->
                 // This runs on IO thread from AudioCapture
-                airPlay2Sessions.forEach { it.sendFrame(pcmData) }
-                raopSessions.forEach { it.sendFrame(pcmData) }
+                synchronized(receiverSessionLock) {
+                    receiverSessions.values.forEach { it.sendFrame(pcmData) }
+                }
             }
             
             scope.launch {
                 try {
                     val synchronizedGroup = targets.size > 1
-                    preparedAirPlay2.forEach { (target, session) ->
+                    preparedSessions.values.filter(ReceiverSession::usesAirPlay2).forEach { session ->
                         try {
                             session.connect(
                                 initialVolume = initialVolume,
                                 synchronizeImmediately = !synchronizedGroup,
                             )
                         } catch (error: Exception) {
-                            throw Exception("${target.name}: ${error.message}", error)
+                            throw Exception("${session.target.name}: ${error.message}", error)
                         }
                     }
-                    preparedAirPlay1.forEach { (target, session) ->
+                    preparedSessions.values.filterNot(ReceiverSession::usesAirPlay2).forEach { session ->
                         try {
-                            session.connect(initialVolume)
+                            session.connect(initialVolume = initialVolume)
                         } catch (error: Exception) {
-                            throw Exception("${target.name}: ${error.message}", error)
+                            throw Exception("${session.target.name}: ${error.message}", error)
                         }
                     }
                     if (synchronizedGroup) {
                         val sharedStartMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
-                        preparedAirPlay2.forEach { (_, session) ->
-                            session.synchronizeAt(sharedStartMillis)
-                        }
-                        preparedAirPlay1.forEach { (_, session) ->
-                            session.synchronizeAt(sharedStartMillis)
-                        }
+                        preparedSessions.values.forEach { it.synchronizeAt(sharedStartMillis) }
                         val protocolLabel = when {
-                            preparedAirPlay1.isNotEmpty() && preparedAirPlay2.isNotEmpty() ->
+                            preparedSessions.values.any(ReceiverSession::usesAirPlay1) &&
+                                preparedSessions.values.any(ReceiverSession::usesAirPlay2) ->
                                 "AirPlay 1 + 2"
-                            preparedAirPlay2.isNotEmpty() -> "AirPlay 2"
+                            preparedSessions.values.any(ReceiverSession::usesAirPlay2) -> "AirPlay 2"
                             else -> "AirPlay 1"
                         }
                         sendStatusBroadcast(
@@ -246,8 +218,10 @@ class AudioCaptureService : Service() {
                                 "($protocolLabel)",
                         )
                     }
+                    sendReceiverStateBroadcast()
                     sendStatusBroadcast("Connected. Starting capture...")
                     audioCapture?.start()
+                    captureStarted = true
                 } catch (e: Exception) {
                     e.printStackTrace()
                     sendErrorBroadcast("Connection failed: ${e.message}")
@@ -277,17 +251,199 @@ class AudioCaptureService : Service() {
         sendBroadcast(intent)
     }
 
+    private suspend fun addReceiver(address: String, enteredPassword: String?) {
+        receiverChangeMutex.withLock {
+            if (!captureStarted) {
+                sendReceiverStateBroadcast(
+                    error = "Wait for the current stream to finish connecting before adding a receiver",
+                )
+                return
+            }
+            if (address in receiverSessionAddresses()) {
+                sendReceiverStateBroadcast()
+                return
+            }
+
+            val credentialStore = AirPlay2CredentialStore(this)
+            val preferences = PreferencesManager(this)
+            var prepared: ReceiverSession? = null
+            try {
+                val target = buildReceiverTarget(
+                    address = address,
+                    preferences = preferences,
+                    credentialStore = credentialStore,
+                    enteredPassword = enteredPassword,
+                )
+                val session = createReceiverSession(
+                    target = target,
+                    credentialStore = credentialStore,
+                    prefixLogs = true,
+                )
+                prepared = session
+                sendStatusBroadcast("[Group] Connecting ${target.name} while capture continues...")
+                session.connect(
+                    initialVolume = currentVolume,
+                    synchronizeImmediately = false,
+                )
+                if (!captureStarted) {
+                    throw IllegalStateException("The stream was stopped while adding ${target.name}")
+                }
+
+                val sharedStartMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
+                synchronized(receiverSessionLock) {
+                    val synchronizedSessions = receiverSessions.values + session
+                    synchronizedSessions.forEach { it.synchronizeAt(sharedStartMillis) }
+                    receiverSessions = receiverSessions + (address to session)
+                }
+                sendStatusBroadcast(
+                    "[Group] ${target.name} joined at the next shared audio frame",
+                )
+                sendReceiverStateBroadcast()
+            } catch (error: Exception) {
+                prepared?.stop()
+                sendReceiverStateBroadcast(
+                    error = "Could not add $address: ${error.message}",
+                )
+            }
+        }
+    }
+
+    private suspend fun removeReceiver(address: String) {
+        receiverChangeMutex.withLock {
+            val removed = synchronized(receiverSessionLock) {
+                if (receiverSessions.size <= 1) {
+                    null
+                } else {
+                    receiverSessions[address]?.also {
+                        receiverSessions = receiverSessions - address
+                    }
+                }
+            }
+            if (removed == null) {
+                val message = if (address in receiverSessionAddresses()) {
+                    "Use Disconnect to stop the final receiver"
+                } else {
+                    null
+                }
+                sendReceiverStateBroadcast(error = message)
+                return
+            }
+
+            sendReceiverStateBroadcast()
+            removed.stop()
+            sendStatusBroadcast("[Group] ${removed.target.name} disconnected")
+        }
+    }
+
+    private fun buildReceiverTarget(
+        address: String,
+        preferences: PreferencesManager,
+        credentialStore: AirPlay2CredentialStore,
+        fallbackUsesAirPlay2: Boolean = false,
+        fallbackTransient: Boolean = false,
+        enteredPassword: String? = null,
+    ): ReceiverTarget {
+        val (targetHost, targetPort) = parseReceiverAddress(address)
+        val capabilities = preferences.getAirPlayCapabilities(address)
+        val targetUsesAirPlay2 = capabilities?.preferredProtocol == AirPlayProtocol.AIRPLAY_2 ||
+            (capabilities == null && fallbackUsesAirPlay2)
+        return ReceiverTarget(
+            address = address,
+            host = targetHost,
+            port = targetPort,
+            name = capabilities?.name ?: address,
+            useAirPlay2 = targetUsesAirPlay2,
+            transient = capabilities?.airPlay2RequiresPassword == false ||
+                (capabilities == null && fallbackTransient),
+            password = enteredPassword?.takeIf(String::isNotEmpty)
+                ?: credentialStore.loadPassword(address)
+                ?: DEFAULT_TRANSIENT_PASSWORD.takeIf { targetUsesAirPlay2 },
+        )
+    }
+
+    private fun capabilitiesMissing(
+        preferences: PreferencesManager,
+        address: String,
+    ): Boolean = preferences.getAirPlayCapabilities(address) == null
+
+    private fun createReceiverSession(
+        target: ReceiverTarget,
+        credentialStore: AirPlay2CredentialStore,
+        prefixLogs: Boolean,
+    ): ReceiverSession {
+        val sessionLog: (String) -> Unit = if (prefixLogs) {
+            { message -> sendStatusBroadcast("[${target.name}] $message") }
+        } else {
+            ::sendStatusBroadcast
+        }
+        return if (target.useAirPlay2) {
+            ReceiverSession(
+                target = target,
+                airPlay2 = AirPlay2Session(
+                    host = target.host,
+                    port = target.port,
+                    credentials = if (target.transient) {
+                        null
+                    } else {
+                        credentialStore.load(target.address)
+                    },
+                    password = target.password,
+                    onCredentialsCreated = { credentials ->
+                        credentialStore.save(target.address, credentials)
+                        sendStatusBroadcast("[AP2] Pairing identity saved")
+                    },
+                    log = sessionLog,
+                    transientPairing = target.transient,
+                    onTransientPasswordAuthenticated = {
+                        if (!target.password.isNullOrEmpty()) {
+                            try {
+                                credentialStore.savePassword(target.address, target.password)
+                                sendStatusBroadcast("[AP2] Receiver password saved securely")
+                            } catch (error: AirPlay2CredentialStoreException) {
+                                sendStatusBroadcast(
+                                    "[AP2] Could not save receiver password: ${error.message}",
+                                )
+                            }
+                        }
+                    },
+                ),
+            )
+        } else {
+            ReceiverSession(
+                target = target,
+                airPlay1 = RaopSession(target.host, target.port, sessionLog),
+            )
+        }
+    }
+
+    private fun receiverSessionSnapshot(): List<ReceiverSession> =
+        synchronized(receiverSessionLock) { receiverSessions.values.toList() }
+
+    private fun receiverSessionAddresses(): Set<String> =
+        synchronized(receiverSessionLock) { receiverSessions.keys.toSet() }
+
+    private fun sendReceiverStateBroadcast(error: String? = null) {
+        val intent = Intent(ACTION_RECEIVER_STATE).apply {
+            putStringArrayListExtra(
+                EXTRA_ACTIVE_RECEIVERS,
+                ArrayList(receiverSessionAddresses()),
+            )
+            error?.let { putExtra(EXTRA_RECEIVER_ERROR, it) }
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
+
     private fun stopCapture() {
         val capture = audioCapture
-        val airPlay1 = raopSessions
-        val airPlay2 = airPlay2Sessions
+        captureStarted = false
+        val sessions = synchronized(receiverSessionLock) {
+            receiverSessions.values.toList().also { receiverSessions = emptyMap() }
+        }
         audioCapture = null
-        raopSessions = emptyList()
-        airPlay2Sessions = emptyList()
         capture?.stop()
         scope.launch {
-            airPlay1.forEach { it.stop() }
-            airPlay2.forEach { it.stop() }
+            sessions.forEach { it.stop() }
         }
     }
 
@@ -310,8 +466,49 @@ class AudioCaptureService : Service() {
         val password: String?,
     )
 
-    private companion object {
+    private data class ReceiverSession(
+        val target: ReceiverTarget,
+        val airPlay1: RaopSession? = null,
+        val airPlay2: AirPlay2Session? = null,
+    ) {
+        val usesAirPlay1: Boolean get() = airPlay1 != null
+        val usesAirPlay2: Boolean get() = airPlay2 != null
+
+        suspend fun connect(
+            initialVolume: Float,
+            synchronizeImmediately: Boolean = true,
+        ) {
+            airPlay1?.connect(initialVolume)
+            airPlay2?.connect(initialVolume, synchronizeImmediately)
+        }
+
+        fun sendFrame(pcm: ByteArray) {
+            airPlay1?.sendFrame(pcm)
+            airPlay2?.sendFrame(pcm)
+        }
+
+        fun synchronizeAt(unixTimeMillis: Long) {
+            airPlay1?.synchronizeAt(unixTimeMillis)
+            airPlay2?.synchronizeAt(unixTimeMillis)
+        }
+
+        fun setVolume(volume: Float) {
+            airPlay1?.setVolume(volume)
+            airPlay2?.setVolume(volume)
+        }
+
+        fun stop() {
+            airPlay1?.stop()
+            airPlay2?.stop()
+        }
+    }
+
+    companion object {
+        const val ACTION_RECEIVER_STATE = "com.egron.lampan.RECEIVER_STATE"
+        const val EXTRA_ACTIVE_RECEIVERS = "ACTIVE_RECEIVERS"
+        const val EXTRA_RECEIVER_ERROR = "RECEIVER_ERROR"
+
         const val GROUP_START_DELAY_MS = 250L
-        const val DEFAULT_TRANSIENT_PASSWORD = "3939"
+        private const val DEFAULT_TRANSIENT_PASSWORD = "3939"
     }
 }
