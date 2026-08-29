@@ -26,6 +26,7 @@ class AudioCaptureService : Service() {
     private var audioCapture: AudioCapture? = null
     private var nowPlayingMonitor: NowPlayingMonitor? = null
     private var receiverSessions = emptyMap<String, ReceiverSession>()
+    private var receiverDelaysMs = emptyMap<String, Int>()
     private val receiverSessionLock = Any()
     private val receiverChangeMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -65,6 +66,12 @@ class AudioCaptureService : Service() {
                 val useTransientAirPlay2 = intent.getBooleanExtra("AIRPLAY2_TRANSIENT", false)
                 val airPlay2Password = intent.getStringExtra("AIRPLAY2_PASSWORD")
                 val receivers = intent.getStringArrayListExtra("RECEIVERS").orEmpty()
+                val delayReceivers = intent.getStringArrayListExtra(EXTRA_DELAY_RECEIVERS).orEmpty()
+                val delayValues = intent.getIntegerArrayListExtra(EXTRA_RECEIVER_DELAYS_MS).orEmpty()
+                val requestedDelaysMs = delayReceivers.zip(delayValues)
+                    .associate { (address, delayMs) ->
+                        address to delayMs.coerceIn(0, MAX_RECEIVER_DELAY_MS)
+                    }
                 
                 if (resultCode != 0 && data != null) {
                     startForegroundService()
@@ -78,6 +85,7 @@ class AudioCaptureService : Service() {
                         useTransientAirPlay2,
                         airPlay2Password,
                         receivers,
+                        requestedDelaysMs,
                     )
                 }
             }
@@ -117,6 +125,25 @@ class AudioCaptureService : Service() {
                     scope.launch { removeReceiver(address) }
                 }
             }
+            ACTION_SET_RECEIVER_DELAY -> {
+                val address = intent.getStringExtra(EXTRA_DELAY_RECEIVER).orEmpty()
+                val delayMs = intent.getIntExtra(EXTRA_RECEIVER_DELAY_MS, 0)
+                    .coerceIn(0, MAX_RECEIVER_DELAY_MS)
+                if (address.isNotEmpty()) {
+                    scope.launch { setReceiverDelay(address, delayMs) }
+                }
+            }
+            ACTION_SET_GROUP_DELAYS -> {
+                val addresses = intent.getStringArrayListExtra(EXTRA_DELAY_RECEIVERS).orEmpty()
+                val delays = intent.getIntegerArrayListExtra(EXTRA_RECEIVER_DELAYS_MS).orEmpty()
+                scope.launch {
+                    setGroupDelays(
+                        addresses.zip(delays).associate { (address, delayMs) ->
+                            address to delayMs.coerceIn(0, MAX_RECEIVER_DELAY_MS)
+                        },
+                    )
+                }
+            }
         }
         return START_NOT_STICKY
     }
@@ -153,6 +180,7 @@ class AudioCaptureService : Service() {
         useTransientAirPlay2: Boolean,
         airPlay2Password: String?,
         receiverAddresses: List<String>,
+        requestedDelaysMs: Map<String, Int>,
     ) {
         try {
             currentVolume = initialVolume
@@ -194,6 +222,9 @@ class AudioCaptureService : Service() {
             }
             synchronized(receiverSessionLock) {
                 receiverSessions = preparedSessions
+                receiverDelaysMs = requestedReceivers.associateWith { address ->
+                    requestedDelaysMs[address]?.coerceIn(0, MAX_RECEIVER_DELAY_MS) ?: 0
+                }
             }
             
             audioCapture = AudioCapture(mediaProjection, { status -> 
@@ -227,7 +258,11 @@ class AudioCaptureService : Service() {
                     }
                     if (synchronizedGroup) {
                         val sharedStartMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
-                        preparedSessions.values.forEach { it.synchronizeAt(sharedStartMillis) }
+                        preparedSessions.forEach { (address, session) ->
+                            session.synchronizeAt(
+                                sharedStartMillis + (requestedDelaysMs[address] ?: 0),
+                            )
+                        }
                         val protocolLabel = when {
                             preparedSessions.values.any(ReceiverSession::usesAirPlay1) &&
                                 preparedSessions.values.any(ReceiverSession::usesAirPlay2) ->
@@ -239,6 +274,13 @@ class AudioCaptureService : Service() {
                             "[Group] ${targets.size} receivers share one RTP/NTP timeline " +
                                 "($protocolLabel)",
                         )
+                        val adjusted = requestedDelaysMs.filterValues { it > 0 }
+                        if (adjusted.isNotEmpty()) {
+                            sendStatusBroadcast(
+                                "[Group] Restored saved speaker timing for " +
+                                    "${adjusted.size} receiver(s)",
+                            )
+                        }
                     } else {
                         // A standalone RAOP receiver needs the same short future-dated
                         // start used by grouped playback. Without it, its first RTP
@@ -326,9 +368,15 @@ class AudioCaptureService : Service() {
 
                 val sharedStartMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
                 synchronized(receiverSessionLock) {
-                    val synchronizedSessions = receiverSessions.values + session
-                    synchronizedSessions.forEach { it.synchronizeAt(sharedStartMillis) }
-                    receiverSessions = receiverSessions + (address to session)
+                    val synchronizedSessions = receiverSessions + (address to session)
+                    val synchronizedDelays = receiverDelaysMs + (address to 0)
+                    synchronizedSessions.forEach { (receiverAddress, receiverSession) ->
+                        receiverSession.synchronizeAt(
+                            sharedStartMillis + (synchronizedDelays[receiverAddress] ?: 0),
+                        )
+                    }
+                    receiverSessions = synchronizedSessions
+                    receiverDelaysMs = synchronizedDelays
                 }
                 sendStatusBroadcast(
                     "[Group] ${target.name} joined at the next shared audio frame",
@@ -351,6 +399,7 @@ class AudioCaptureService : Service() {
                 } else {
                     receiverSessions[address]?.also {
                         receiverSessions = receiverSessions - address
+                        receiverDelaysMs = receiverDelaysMs - address
                     }
                 }
             }
@@ -460,6 +509,51 @@ class AudioCaptureService : Service() {
     private fun hasActiveStream(): Boolean =
         captureStarted || audioCapture != null || receiverSessionAddresses().isNotEmpty()
 
+    private fun setReceiverDelay(address: String, delayMs: Int) {
+        val session = synchronized(receiverSessionLock) {
+            receiverSessions[address]?.also {
+                receiverDelaysMs = receiverDelaysMs + (address to delayMs)
+            }
+        }
+        if (session == null || !captureStarted) {
+            sendReceiverStateBroadcast(error = "Receiver is not currently streaming")
+            return
+        }
+
+        // Keep the next frame safely in the future while changing its mapping.
+        // Only this receiver moves; the chosen reference and other sessions keep
+        // their established timelines.
+        session.synchronizeAt(
+            System.currentTimeMillis() + GROUP_START_DELAY_MS + delayMs,
+        )
+        sendStatusBroadcast("[Group] ${session.target.name} delay set to $delayMs ms")
+        sendReceiverStateBroadcast()
+    }
+
+    private fun setGroupDelays(delaysMs: Map<String, Int>) {
+        val sessions = synchronized(receiverSessionLock) {
+            if (!captureStarted || receiverSessions.keys != delaysMs.keys) {
+                emptyMap()
+            } else {
+                receiverDelaysMs = receiverSessions.keys.associateWith { address ->
+                    delaysMs[address] ?: 0
+                }
+                receiverSessions.toMap()
+            }
+        }
+        if (sessions.isEmpty()) {
+            sendReceiverStateBroadcast(error = "The selected receiver group is not streaming")
+            return
+        }
+
+        val sharedTargetMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
+        sessions.forEach { (address, session) ->
+            session.synchronizeAt(sharedTargetMillis + (delaysMs[address] ?: 0))
+        }
+        sendStatusBroadcast("[Group] Reference receiver changed; speaker timing reset")
+        sendReceiverStateBroadcast()
+    }
+
     private fun startNowPlayingMonitor() {
         nowPlayingMonitor?.close()
         nowPlayingMonitor = null
@@ -483,6 +577,12 @@ class AudioCaptureService : Service() {
             )
             putExtra(EXTRA_IS_STREAMING, hasActiveStream())
             putExtra(EXTRA_CURRENT_VOLUME, currentVolume)
+            val delays = synchronized(receiverSessionLock) { receiverDelaysMs.toMap() }
+            putStringArrayListExtra(EXTRA_DELAY_RECEIVERS, ArrayList(delays.keys))
+            putIntegerArrayListExtra(
+                EXTRA_RECEIVER_DELAYS_MS,
+                ArrayList(delays.values),
+            )
             error?.let { putExtra(EXTRA_RECEIVER_ERROR, it) }
             setPackage(packageName)
         }
@@ -495,7 +595,10 @@ class AudioCaptureService : Service() {
         val capture = audioCapture
         captureStarted = false
         val sessions = synchronized(receiverSessionLock) {
-            receiverSessions.values.toList().also { receiverSessions = emptyMap() }
+            receiverSessions.values.toList().also {
+                receiverSessions = emptyMap()
+                receiverDelaysMs = emptyMap()
+            }
         }
         audioCapture = null
         capture?.stop()
@@ -569,10 +672,16 @@ class AudioCaptureService : Service() {
         const val ACTION_RECEIVER_STATE = "com.egron.lampan.RECEIVER_STATE"
         const val ACTION_QUERY_STATE = "com.egron.lampan.QUERY_STREAM_STATE"
         const val ACTION_REFRESH_NOW_PLAYING = "com.egron.lampan.REFRESH_NOW_PLAYING"
+        const val ACTION_SET_RECEIVER_DELAY = "com.egron.lampan.SET_RECEIVER_DELAY"
+        const val ACTION_SET_GROUP_DELAYS = "com.egron.lampan.SET_GROUP_DELAYS"
         const val EXTRA_ACTIVE_RECEIVERS = "ACTIVE_RECEIVERS"
         const val EXTRA_RECEIVER_ERROR = "RECEIVER_ERROR"
         const val EXTRA_IS_STREAMING = "IS_STREAMING"
         const val EXTRA_CURRENT_VOLUME = "CURRENT_VOLUME"
+        const val EXTRA_DELAY_RECEIVER = "DELAY_RECEIVER"
+        const val EXTRA_DELAY_RECEIVERS = "DELAY_RECEIVERS"
+        const val EXTRA_RECEIVER_DELAY_MS = "RECEIVER_DELAY_MS"
+        const val EXTRA_RECEIVER_DELAYS_MS = "RECEIVER_DELAYS_MS"
 
         const val GROUP_START_DELAY_MS = 250L
         private const val DEFAULT_INITIAL_VOLUME = 0.5f

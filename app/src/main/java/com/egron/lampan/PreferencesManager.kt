@@ -54,7 +54,41 @@ class PreferencesManager(context: Context) {
 
     fun isDarkThemeEnabled(): Boolean = prefs.getBoolean(DARK_THEME_ENABLED, true)
 
-    fun saveAirPlayCapabilities(device: AirPlayDevice) {
+    internal fun getGroupSyncProfile(receiverKeys: Collection<String>): GroupSyncProfile {
+        val keys = receiverKeys.distinct().sorted()
+        require(keys.size > 1) { "Group timing requires at least two receivers" }
+        val prefix = groupSyncPrefix(keys)
+        val reference = prefs.getString("${prefix}_reference", null)
+            ?.takeIf { it in keys }
+            ?: keys.first()
+        return GroupSyncProfile(
+            referenceKey = reference,
+            delaysMs = keys.associateWith { receiverKey ->
+                prefs.getInt("${prefix}_delay_${preferenceDigest(receiverKey)}", 0)
+            },
+        ).normalized(keys)
+    }
+
+    internal fun saveGroupSyncProfile(
+        receiverKeys: Collection<String>,
+        profile: GroupSyncProfile,
+    ) {
+        val keys = receiverKeys.distinct().sorted()
+        require(keys.size > 1) { "Group timing requires at least two receivers" }
+        val normalized = profile.normalized(keys)
+        val prefix = groupSyncPrefix(keys)
+        prefs.edit().apply {
+            putString("${prefix}_reference", normalized.referenceKey)
+            keys.forEach { receiverKey ->
+                putInt(
+                    "${prefix}_delay_${preferenceDigest(receiverKey)}",
+                    normalized.delaysMs[receiverKey] ?: 0,
+                )
+            }
+        }.apply()
+    }
+
+    fun saveAirPlayCapabilities(device: AirPlayDevice, networkName: String? = null) {
         val receivers = listOfNotNull(device.airPlay1Port, device.airPlay2Port)
             .map { port -> "${device.ip}:$port" }
         // Discovery returns fresh capability records. Keep an explicit user
@@ -88,6 +122,14 @@ class PreferencesManager(context: Context) {
             .toMutableSet()
             .apply { addAll(receivers) }
         prefs.edit().putStringSet(KNOWN_RECEIVERS, knownReceivers).apply()
+        if (networkName.isUsableNetworkName()) {
+            val networkKey = networkReceiversKey(requireNotNull(networkName))
+            val networkReceivers = prefs.getStringSet(networkKey, emptySet())
+                .orEmpty()
+                .toMutableSet()
+                .apply { addAll(receivers) }
+            prefs.edit().putStringSet(networkKey, networkReceivers).apply()
+        }
     }
 
     fun getAirPlayCapabilities(receiver: String): AirPlayDevice? {
@@ -118,18 +160,53 @@ class PreferencesManager(context: Context) {
         )
     }
 
-    fun getKnownAirPlayDevices(): List<AirPlayDevice> =
-        prefs.getStringSet(KNOWN_RECEIVERS, emptySet())
-            .orEmpty()
+    fun getKnownAirPlayDevices(networkName: String? = null): List<AirPlayDevice> {
+        val receiverAddresses = if (networkName.isUsableNetworkName()) {
+            networkReceiverAddresses(requireNotNull(networkName))
+        } else {
+            prefs.getStringSet(KNOWN_RECEIVERS, emptySet()).orEmpty()
+        }
+        return receiverAddresses
             .mapNotNull(::getAirPlayCapabilities)
             .distinctBy { it.ip }
             .sortedBy { it.name.lowercase() }
+    }
+
+    private fun networkReceiverAddresses(networkName: String): Set<String> {
+        val networkKey = networkReceiversKey(networkName)
+        prefs.getStringSet(networkKey, null)?.let { return it.toSet() }
+
+        // Older Lampan versions remembered one last address per SSID but kept
+        // the device list global. Seed this network with that receiver and its
+        // alternate AirPlay port. A scan will add any other devices once.
+        val legacyAddress = getIpForSsid(networkName)
+        val legacyHost = legacyAddress.substringBefore(':').trim()
+        val migrated = prefs.getStringSet(KNOWN_RECEIVERS, emptySet())
+            .orEmpty()
+            .filterTo(mutableSetOf()) { address ->
+                address == legacyAddress || (
+                    legacyHost.isNotEmpty() &&
+                        getAirPlayCapabilities(address)?.ip == legacyHost
+                    )
+            }
+        prefs.edit().putStringSet(networkKey, migrated).apply()
+        return migrated
+    }
 
     private fun capabilityPrefix(receiver: String): String {
+        return "AIRPLAY_CAP_${preferenceDigest(receiver)}"
+    }
+
+    private fun groupSyncPrefix(receiverKeys: Collection<String>): String =
+        "GROUP_SYNC_${preferenceDigest(groupSyncIdentity(receiverKeys))}"
+
+    private fun networkReceiversKey(networkName: String): String =
+        "NETWORK_RECEIVERS_${preferenceDigest(networkName)}"
+
+    private fun preferenceDigest(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
-            .digest(receiver.toByteArray(Charsets.UTF_8))
-        return "AIRPLAY_CAP_" +
-            Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+            .digest(value.toByteArray(Charsets.UTF_8))
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
     }
 
     private companion object {
@@ -145,3 +222,6 @@ class PreferencesManager(context: Context) {
         const val PASSWORD_REQUIRED = 1
     }
 }
+
+internal fun String?.isUsableNetworkName(): Boolean =
+    !this.isNullOrBlank() && this != "<unknown ssid>"

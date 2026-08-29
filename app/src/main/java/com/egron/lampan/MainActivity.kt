@@ -98,6 +98,7 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -175,6 +176,12 @@ private data class AddDeviceReturnState(
     val ipAddress: String,
 )
 
+private data class GroupTimingReceiver(
+    val address: String,
+    val key: String,
+    val name: String,
+)
+
 private const val REACHABILITY_REFRESH_MS = 10_000L
 private val RECEIVER_AVAILABLE_COLOR = Color(0xFF4CAF50)
 
@@ -216,9 +223,12 @@ fun MainScreen(
     val uiScope = rememberCoroutineScope()
     val currentSsid = remember { getCurrentSsid(context) }
 
-    val initialIpAddress = remember {
-        prefsManager.getIpForSsid(currentSsid).ifEmpty {
-            prefsManager.getLastUsedIp()
+    val initialIpAddress = remember(currentSsid) {
+        val networkAddress = prefsManager.getIpForSsid(currentSsid)
+        if (currentSsid.isUsableNetworkName()) {
+            networkAddress
+        } else {
+            networkAddress.ifEmpty { prefsManager.getLastUsedIp() }
         }
     }
     val initialDevice = remember(initialIpAddress) {
@@ -263,7 +273,7 @@ fun MainScreen(
     var selectedDevice by remember { mutableStateOf(initialDevice) }
     var knownDevices by remember {
         mutableStateOf(
-            (prefsManager.getKnownAirPlayDevices() + listOfNotNull(initialDevice))
+            (prefsManager.getKnownAirPlayDevices(currentSsid) + listOfNotNull(initialDevice))
                 .distinctBy { it.ip }
                 .sortedBy { it.name.lowercase() },
         )
@@ -327,9 +337,9 @@ fun MainScreen(
                 receiverId = current?.receiverId,
                 protocolPreference = current?.protocolPreference,
             )
-            prefsManager.saveAirPlayCapabilities(remembered)
+            prefsManager.saveAirPlayCapabilities(remembered, currentSsid)
             selectedDevice = remembered
-            knownDevices = prefsManager.getKnownAirPlayDevices()
+            knownDevices = prefsManager.getKnownAirPlayDevices(currentSsid)
             if (selectedReceiverAddresses.isEmpty()) {
                 selectedReceiverAddresses = setOf(preferredReceiverAddress(remembered))
             }
@@ -367,6 +377,32 @@ fun MainScreen(
     val activeReceiverAddresses = selectedReceiverAddresses.ifEmpty {
         setOf(currentReceiverAddress).filter(String::isNotEmpty).toSet()
     }
+    val groupTimingReceivers = selectedReceiverAddresses.map { address ->
+        val device = knownDevices.firstOrNull {
+            preferredReceiverAddress(it) == address
+        }
+        GroupTimingReceiver(
+            address = address,
+            key = device?.let(::receiverSyncKey) ?: address,
+            name = device?.name ?: address,
+        )
+    }.sortedBy { it.name.lowercase() }
+    val groupTimingKeys = groupTimingReceivers.map(GroupTimingReceiver::key)
+    val timingGroupIdentity = groupSyncIdentity(groupTimingKeys)
+    var groupSyncProfile by remember(timingGroupIdentity) {
+        mutableStateOf(
+            if (groupTimingKeys.distinct().size > 1) {
+                prefsManager.getGroupSyncProfile(groupTimingKeys)
+            } else {
+                null
+            },
+        )
+    }
+    val receiverDelaysMs = groupSyncProfile?.let { profile ->
+        groupTimingReceivers.associate { receiver ->
+            receiver.address to (profile.delaysMs[receiver.key] ?: 0)
+        }
+    }.orEmpty()
     val receiverReachability = aggregateReceiverReachability(
         activeReceiverAddresses,
         receiverReachabilityByAddress,
@@ -422,7 +458,7 @@ fun MainScreen(
                                 name = info.name ?: remembered.name,
                                 receiverId = receivedId,
                             )
-                            prefsManager.saveAirPlayCapabilities(identified)
+                            prefsManager.saveAirPlayCapabilities(identified, currentSsid)
                             if (selectedDevice?.let(::preferredReceiverAddress) == address) {
                                 selectedDevice = identified
                             }
@@ -436,7 +472,7 @@ fun MainScreen(
             }
             receiverReachabilityByAddress = receiverReachabilityByAddress + statuses
             if (capabilitiesChanged) {
-                knownDevices = prefsManager.getKnownAirPlayDevices()
+                knownDevices = prefsManager.getKnownAirPlayDevices(currentSsid)
             }
             delay(REACHABILITY_REFRESH_MS)
         }
@@ -615,6 +651,7 @@ fun MainScreen(
                     selectedDevice?.airPlay2RequiresPassword == false,
                 airPlay2Password = airPlay2Password.takeIf { it.isNotEmpty() },
                 receiverAddresses = selectedReceiverAddresses.toList(),
+                receiverDelaysMs = receiverDelaysMs,
             )
             isConnected = true
             isConnecting = false
@@ -731,7 +768,13 @@ fun MainScreen(
             SectionCard(title = "Receiver") {
                 if (knownDevices.isNotEmpty()) {
                     Text(
-                        text = "Known Devices",
+                        text = if (
+                            currentSsid.isNotEmpty() && currentSsid != "<unknown ssid>"
+                        ) {
+                            "Known devices on $currentSsid"
+                        } else {
+                            "Known devices"
+                        },
                         style = MaterialTheme.typography.titleSmall,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
@@ -979,8 +1022,8 @@ fun MainScreen(
                                         protocolPreference = protocol,
                                     )
                                     val newAddress = preferredReceiverAddress(updated)
-                                    prefsManager.saveAirPlayCapabilities(updated)
-                                    knownDevices = prefsManager.getKnownAirPlayDevices()
+                                    prefsManager.saveAirPlayCapabilities(updated, currentSsid)
+                                    knownDevices = prefsManager.getKnownAirPlayDevices(currentSsid)
                                     selectedDevice = updated
                                     receiverProtocol = protocol
                                     selectedReceiverAddresses = if (
@@ -1326,8 +1369,8 @@ fun MainScreen(
                                 val port = requireNotNull(selected.portFor(protocol))
                                 selectedDevice = selected
                                 receiverProtocol = protocol
-                                prefsManager.saveAirPlayCapabilities(selected)
-                                knownDevices = prefsManager.getKnownAirPlayDevices()
+                                prefsManager.saveAirPlayCapabilities(selected, currentSsid)
+                                knownDevices = prefsManager.getKnownAirPlayDevices(currentSsid)
                                 isAddingDevice = false
                                 addDeviceReturnState = null
                                 updateIpAddress("${selected.ip}:$port")
@@ -1355,6 +1398,54 @@ fun MainScreen(
                         }
                     }
                 }
+            }
+
+            if (groupTimingReceivers.size > 1 && groupSyncProfile != null) {
+                val profile = requireNotNull(groupSyncProfile)
+                SpeakerTimingCard(
+                    receivers = groupTimingReceivers,
+                    profile = profile,
+                    isConnected = isConnected,
+                    onSelectReference = { receiverKey ->
+                        val updated = profile.selectReference(groupTimingKeys, receiverKey)
+                        groupSyncProfile = updated
+                        prefsManager.saveGroupSyncProfile(groupTimingKeys, updated)
+                        if (isConnected) {
+                            setGroupReceiverDelays(
+                                context = context,
+                                delaysMs = groupTimingReceivers.associate { receiver ->
+                                    receiver.address to (updated.delaysMs[receiver.key] ?: 0)
+                                },
+                            )
+                        }
+                    },
+                    onDelayChange = { receiverKey, delayMs ->
+                        groupSyncProfile = profile.withDelay(
+                            receiverKeys = groupTimingKeys,
+                            receiverKey = receiverKey,
+                            delayMs = delayMs,
+                        )
+                    },
+                    onDelayChangeFinished = { receiverKey, delayMs ->
+                        val updated = (groupSyncProfile ?: profile).withDelay(
+                            receiverKeys = groupTimingKeys,
+                            receiverKey = receiverKey,
+                            delayMs = delayMs,
+                        )
+                        groupSyncProfile = updated
+                        prefsManager.saveGroupSyncProfile(groupTimingKeys, updated)
+                        if (isConnected) {
+                            groupTimingReceivers.firstOrNull { it.key == receiverKey }
+                                ?.let { receiver ->
+                                    setReceiverDelay(
+                                        context = context,
+                                        receiver = receiver.address,
+                                        delayMs = updated.delaysMs[receiver.key] ?: 0,
+                                    )
+                                }
+                        }
+                    },
+                )
             }
 
             if (isConnected) {
@@ -1698,6 +1789,143 @@ private fun SectionCard(
 }
 
 @Composable
+private fun SpeakerTimingCard(
+    receivers: List<GroupTimingReceiver>,
+    profile: GroupSyncProfile,
+    isConnected: Boolean,
+    onSelectReference: (String) -> Unit,
+    onDelayChange: (String, Int) -> Unit,
+    onDelayChangeFinished: (String, Int) -> Unit,
+) {
+    val referenceName = receivers.firstOrNull { it.key == profile.referenceKey }?.name
+        ?: receivers.first().name
+    SectionCard(title = "Speaker timing") {
+        Text(
+            text = "Use the receiver you hear latest as the reference, then delay the " +
+                "others until they match. " + if (isConnected) {
+                    "Changes are applied when you release a slider."
+                } else {
+                    "These settings will be used the next time this group streams."
+                },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+
+        receivers.forEachIndexed { index, receiver ->
+            if (index > 0) {
+                Spacer(modifier = Modifier.height(6.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+            val isReference = receiver.key == profile.referenceKey
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(receiver.name, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (isReference) {
+                            "Reference receiver"
+                        } else {
+                            "Delayed relative to $referenceName"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (isReference) {
+                    Text(
+                        "Reference",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    TextButton(onClick = { onSelectReference(receiver.key) }) {
+                        Text("Set reference")
+                    }
+                }
+            }
+
+            if (!isReference) {
+                val delayMs = profile.delaysMs[receiver.key] ?: 0
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Slider(
+                        value = delayMs.toFloat(),
+                        onValueChange = { value ->
+                            val stepped = (
+                                value / RECEIVER_DELAY_STEP_MS
+                            ).roundToInt() * RECEIVER_DELAY_STEP_MS
+                            onDelayChange(receiver.key, stepped)
+                        },
+                        onValueChangeFinished = {
+                            onDelayChangeFinished(receiver.key, delayMs)
+                        },
+                        modifier = Modifier.weight(1f),
+                        valueRange = 0f..MAX_RECEIVER_DELAY_MS.toFloat(),
+                        steps = MAX_RECEIVER_DELAY_MS / RECEIVER_DELAY_STEP_MS - 1,
+                    )
+                    Text(
+                        "$delayMs ms",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(
+                        onClick = {
+                            onDelayChange(
+                                receiver.key,
+                                delayMs - RECEIVER_DELAY_STEP_MS,
+                            )
+                            onDelayChangeFinished(
+                                receiver.key,
+                                delayMs - RECEIVER_DELAY_STEP_MS,
+                            )
+                        },
+                        enabled = delayMs > 0,
+                    ) {
+                        Text("−5 ms")
+                    }
+                    TextButton(
+                        onClick = {
+                            onDelayChange(receiver.key, 0)
+                            onDelayChangeFinished(receiver.key, 0)
+                        },
+                        enabled = delayMs != 0,
+                    ) {
+                        Text("Reset")
+                    }
+                    TextButton(
+                        onClick = {
+                            onDelayChange(
+                                receiver.key,
+                                delayMs + RECEIVER_DELAY_STEP_MS,
+                            )
+                            onDelayChangeFinished(
+                                receiver.key,
+                                delayMs + RECEIVER_DELAY_STEP_MS,
+                            )
+                        },
+                        enabled = delayMs < MAX_RECEIVER_DELAY_MS,
+                    ) {
+                        Text("+5 ms")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun DeviceRow(
     device: AirPlayDevice,
     selected: Boolean = false,
@@ -1772,6 +2000,7 @@ fun startService(
     useTransientAirPlay2: Boolean = false,
     airPlay2Password: String? = null,
     receiverAddresses: List<String> = emptyList(),
+    receiverDelaysMs: Map<String, Int> = emptyMap(),
 ) {
     val (host, port) = parseIpAndPort(rawIp)
     val intent = Intent(context, AudioCaptureService::class.java).apply {
@@ -1785,6 +2014,14 @@ fun startService(
         putExtra("AIRPLAY2_TRANSIENT", useTransientAirPlay2)
         airPlay2Password?.let { putExtra("AIRPLAY2_PASSWORD", it) }
         putStringArrayListExtra("RECEIVERS", ArrayList(receiverAddresses))
+        putStringArrayListExtra(
+            AudioCaptureService.EXTRA_DELAY_RECEIVERS,
+            ArrayList(receiverDelaysMs.keys),
+        )
+        putIntegerArrayListExtra(
+            AudioCaptureService.EXTRA_RECEIVER_DELAYS_MS,
+            ArrayList(receiverDelaysMs.values),
+        )
     }
     ContextCompat.startForegroundService(context, intent)
 }
@@ -1813,6 +2050,30 @@ private fun removeReceiverFromStream(context: Context, receiver: String) {
     val intent = Intent(context, AudioCaptureService::class.java).apply {
         action = "REMOVE_RECEIVER"
         putExtra("RECEIVER", receiver)
+    }
+    context.startService(intent)
+}
+
+private fun setReceiverDelay(context: Context, receiver: String, delayMs: Int) {
+    val intent = Intent(context, AudioCaptureService::class.java).apply {
+        action = AudioCaptureService.ACTION_SET_RECEIVER_DELAY
+        putExtra(AudioCaptureService.EXTRA_DELAY_RECEIVER, receiver)
+        putExtra(AudioCaptureService.EXTRA_RECEIVER_DELAY_MS, delayMs)
+    }
+    context.startService(intent)
+}
+
+private fun setGroupReceiverDelays(context: Context, delaysMs: Map<String, Int>) {
+    val intent = Intent(context, AudioCaptureService::class.java).apply {
+        action = AudioCaptureService.ACTION_SET_GROUP_DELAYS
+        putStringArrayListExtra(
+            AudioCaptureService.EXTRA_DELAY_RECEIVERS,
+            ArrayList(delaysMs.keys),
+        )
+        putIntegerArrayListExtra(
+            AudioCaptureService.EXTRA_RECEIVER_DELAYS_MS,
+            ArrayList(delaysMs.values),
+        )
     }
     context.startService(intent)
 }
