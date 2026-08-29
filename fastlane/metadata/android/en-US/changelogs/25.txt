@@ -1,0 +1,1 @@
+Corrects the internal version after v0.5.0, adds reproducible source-revision metadata, and prepares the F-Droid listing. This release also includes Wi-Fi-scoped receiver lists, manual group synchronization, long-press device management, live group changes, and the new Lampan icon.

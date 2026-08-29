@@ -1,0 +1,17 @@
+Lampan captures playback audio from Android apps and streams it directly to
+AirPlay receivers on your local network.
+
+Features include:
+
+* AirPlay 1 support for speakers such as IKEA Symfonisk and Sonos
+* Native encrypted AirPlay 2 for compatible receivers such as Sony Bravia TVs
+* Automatic receiver discovery and remembered device capabilities
+* Multi-receiver streaming with manual synchronization adjustments
+* Background streaming and volume control
+* Secure local storage for successfully verified receiver access
+
+Lampan has no accounts, advertisements, subscriptions, analytics, or cloud
+relay. Audio and receiver control traffic remain on your local network.
+
+Android playback-capture restrictions still apply. Apps can prevent their audio
+from being captured, and Lampan does not bypass DRM protection.

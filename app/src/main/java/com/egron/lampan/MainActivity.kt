@@ -1790,7 +1790,10 @@ private fun SettingsScreen(
                 if (BuildConfig.NOW_PLAYING_ENABLED) "Now Playing" else "Standard",
             )
             AboutRow("Build type", BuildConfig.BUILD_TYPE)
-            AboutRow("Built", formattedBuildTime(BuildConfig.BUILD_TIME_UTC))
+            AboutRow(
+                "Source revision",
+                formattedBuildTime(BuildConfig.SOURCE_REVISION_TIME_UTC),
+            )
             AboutRow("Package", BuildConfig.APPLICATION_ID)
         }
     }

@@ -7,7 +7,19 @@ plugins {
 
 val releaseStoreFile = System.getenv("LAMPAN_RELEASE_STORE_FILE")
 val releaseStorePassword = System.getenv("LAMPAN_RELEASE_STORE_PASSWORD")
-val lampanBuildTimeUtc = Instant.now().toString()
+val sourceRevisionEpoch = providers.environmentVariable("SOURCE_DATE_EPOCH")
+    .orElse(
+        providers.exec {
+            commandLine("git", "log", "-1", "--format=%ct")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.map(String::trim),
+    )
+    .getOrElse("")
+    .toLongOrNull()
+val lampanSourceRevisionUtc = sourceRevisionEpoch
+    ?.let(Instant::ofEpochSecond)
+    ?.toString()
+    ?: "unknown"
 val releaseSigningValues = listOf(releaseStoreFile, releaseStorePassword)
 if (releaseSigningValues.any { !it.isNullOrBlank() } &&
     releaseSigningValues.any { it.isNullOrBlank() }
@@ -24,9 +36,13 @@ android {
         applicationId = "com.egron.lampan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 24
-        versionName = "0.4.9"
-        buildConfigField("String", "BUILD_TIME_UTC", "\"$lampanBuildTimeUtc\"")
+        versionCode = 25
+        versionName = "0.5.1"
+        buildConfigField(
+            "String",
+            "SOURCE_REVISION_TIME_UTC",
+            "\"$lampanSourceRevisionUtc\"",
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

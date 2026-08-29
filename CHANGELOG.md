@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.5.1
+
+- Correct the Android version name and code after the `v0.5.0` tag retained
+  the previous internal `0.4.9` version.
+- Make source-revision metadata deterministic so independent builds of the same
+  tag can be compared for reproducibility.
+- Add upstream F-Droid/Fastlane listing metadata.
+
+## v0.5.0
+
+- Scope remembered receiver lists to the current Wi-Fi network while safely
+  migrating reachable receivers saved by older versions.
+- Add manual per-group receiver delay controls with a selectable timing
+  reference for improving multi-device synchronization.
+- Add long-press receiver management with configure and remove actions.
+- Allow a selected receiver to be detached or added while streaming.
+- Add a new adaptive lamp-and-audio application icon.
+
 ## v0.4.2
 
 - Allow experimental groups containing AirPlay 1, AirPlay 2, or a mix of both.
