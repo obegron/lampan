@@ -25,7 +25,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +46,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -294,6 +296,7 @@ fun MainScreen(
     var hasSavedAirPlay2Pairing by remember { mutableStateOf(false) }
     var hasSavedAirPlay2Password by remember { mutableStateOf(false) }
     var confirmForgetAirPlay2Pairing by remember { mutableStateOf(false) }
+    var receiverPendingRemoval by remember { mutableStateOf<AirPlayDevice?>(null) }
     var volume by remember { mutableStateOf(prefsManager.getVolume()) }
     var showDebugInformation by remember {
         mutableStateOf(prefsManager.isDebugInformationEnabled())
@@ -618,6 +621,94 @@ fun MainScreen(
         )
     }
 
+    receiverPendingRemoval?.let { removing ->
+        val removingAddress = preferredReceiverAddress(removing)
+        val removingActiveReceiver = removingAddress in selectedReceiverAddresses
+        val removalScope = if (currentSsid.isUsableNetworkName()) {
+            "the device list for $currentSsid"
+        } else {
+            "the remembered device list"
+        }
+        AlertDialog(
+            onDismissRequest = { receiverPendingRemoval = null },
+            title = { Text("Remove ${removing.name}?") },
+            text = {
+                Text(
+                    "This removes the receiver from $removalScope. " +
+                        if (isConnected && removingActiveReceiver) {
+                            "It will also be disconnected from the current stream. "
+                        } else {
+                            ""
+                        } +
+                        "Its saved AirPlay access remains on this phone, and a scan can " +
+                        "add it again.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (removingActiveReceiver && (isConnected || isConnecting)) {
+                            if (isConnected && selectedReceiverAddresses.size > 1) {
+                                pendingReceiverAddresses = setOf(removingAddress)
+                                removeReceiverFromStream(context, removingAddress)
+                            } else {
+                                stopService(context)
+                                pendingReceiverAddresses = emptySet()
+                                isConnected = false
+                                isConnecting = false
+                            }
+                        }
+                        prefsManager.removeAirPlayDeviceFromNetwork(removing, currentSsid)
+                        val remainingKnown = prefsManager.getKnownAirPlayDevices(currentSsid)
+                        knownDevices = remainingKnown
+                        val remainingSelected = selectedReceiverAddresses.filterTo(mutableSetOf()) {
+                            parseIpAndPort(it).first != removing.ip
+                        }
+                        val focusedAddress = selectedDevice?.let(::preferredReceiverAddress)
+                        val next = remainingKnown.firstOrNull {
+                            preferredReceiverAddress(it) == focusedAddress &&
+                                focusedAddress in remainingSelected
+                        } ?: remainingKnown.firstOrNull {
+                            preferredReceiverAddress(it) in remainingSelected
+                        } ?: remainingKnown.firstOrNull()
+                        selectedDevice = next
+                        selectedReceiverAddresses = if (remainingSelected.isNotEmpty()) {
+                            remainingSelected
+                        } else {
+                            next?.let(::preferredReceiverAddress)?.let(::setOf).orEmpty()
+                        }
+                        receiverReachabilityByAddress = receiverReachabilityByAddress.filterKeys {
+                            parseIpAndPort(it).first != removing.ip
+                        }
+                        if (next != null) {
+                            receiverProtocol = next.preferredProtocol
+                            updateIpAddress(preferredReceiverAddress(next))
+                            isAddingDevice = false
+                        } else {
+                            receiverProtocol = AirPlayProtocol.AIRPLAY_1
+                            updateIpAddress("")
+                            isAddingDevice = true
+                        }
+                        receiverPendingRemoval = null
+                    },
+                ) {
+                    Text(
+                        if (isConnected && removingActiveReceiver) {
+                            "Disconnect and remove"
+                        } else {
+                            "Remove"
+                        },
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { receiverPendingRemoval = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     // Auto-scroll to bottom
     LaunchedEffect(statusLogs.size) {
         listState.animateScrollToItem(statusLogs.size - 1)
@@ -632,6 +723,50 @@ fun MainScreen(
                         preferredReceiverAddress(device) to ReceiverReachability.REACHABLE
                     }
             }
+        }
+    }
+
+    // Older versions knew receivers globally. Attach only receivers that are
+    // reachable on this Wi-Fi and still report the remembered stable identity.
+    LaunchedEffect(currentSsid) {
+        if (!currentSsid.isUsableNetworkName()) return@LaunchedEffect
+        val scopedIps = prefsManager.getKnownAirPlayDevices(currentSsid)
+            .map(AirPlayDevice::ip)
+            .toSet()
+        val candidates = prefsManager.getKnownAirPlayDevices()
+            .filterNot { it.ip in scopedIps }
+            .filterNot { prefsManager.isAirPlayDeviceRemovedFromNetwork(it, currentSsid) }
+        if (candidates.isEmpty()) return@LaunchedEffect
+
+        val reachable = coroutineScope {
+            candidates.map { device ->
+                async(Dispatchers.IO) {
+                    val (host, port) = parseIpAndPort(preferredReceiverAddress(device))
+                    val info = runCatching {
+                        AirPlayReceiverProbe(host, port).getInfo()
+                    }.getOrNull()
+                    val identityMatches = info != null && (
+                        device.receiverId == null || device.receiverId in info.receiverIds
+                    )
+                    device to info?.takeIf { identityMatches }
+                }
+            }.awaitAll()
+        }
+        var changed = false
+        reachable.forEach { (device, info) ->
+            if (info != null) {
+                prefsManager.saveAirPlayCapabilities(
+                    device.copy(
+                        name = info.name ?: device.name,
+                        receiverId = info.receiverId ?: device.receiverId,
+                    ),
+                    currentSsid,
+                )
+                changed = true
+            }
+        }
+        if (changed) {
+            knownDevices = prefsManager.getKnownAirPlayDevices(currentSsid)
         }
     }
 
@@ -777,6 +912,11 @@ fun MainScreen(
                         },
                         style = MaterialTheme.typography.titleSmall,
                     )
+                    Text(
+                        text = "Long-press a device to configure or remove it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Spacer(modifier = Modifier.height(4.dp))
                     LazyColumn(
                         modifier = Modifier
@@ -795,6 +935,15 @@ fun MainScreen(
                                 } else {
                                     receiverReachabilityByAddress[deviceAddress]
                                 },
+                                onConfigure = {
+                                    selectedDevice = device
+                                    receiverProtocol = device.preferredProtocol
+                                    isAddingDevice = false
+                                    addDeviceReturnState = null
+                                    isScanning = false
+                                    updateIpAddress(deviceAddress)
+                                },
+                                onRemove = { receiverPendingRemoval = device },
                             ) {
                                 val protocol = device.preferredProtocol
                                 val port = requireNotNull(device.portFor(protocol))
@@ -1930,60 +2079,95 @@ private fun DeviceRow(
     device: AirPlayDevice,
     selected: Boolean = false,
     status: ReceiverReachability? = null,
+    onConfigure: (() -> Unit)? = null,
+    onRemove: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = MaterialTheme.shapes.medium,
-        color = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant
-        },
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+    var showDeviceMenu by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = if (onConfigure != null || onRemove != null) {
+                        { showDeviceMenu = true }
+                    } else {
+                        null
+                    },
+                ),
+            shape = MaterialTheme.shapes.medium,
+            color = if (selected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = device.name, style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    text = "${device.ip}:${device.portFor(device.preferredProtocol)} · " +
-                        device.protocolLabel + if (
-                            device.airPlay1Port != null && device.airPlay2Port != null
-                        ) {
-                            " · uses " + if (
-                                device.preferredProtocol == AirPlayProtocol.AIRPLAY_2
+            Row(
+                modifier = Modifier.padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = device.name, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "${device.ip}:${device.portFor(device.preferredProtocol)} · " +
+                            device.protocolLabel + if (
+                                device.airPlay1Port != null && device.airPlay2Port != null
                             ) {
-                                "AirPlay 2"
+                                " · uses " + if (
+                                    device.preferredProtocol == AirPlayProtocol.AIRPLAY_2
+                                ) {
+                                    "AirPlay 2"
+                                } else {
+                                    "AirPlay 1"
+                                }
                             } else {
-                                "AirPlay 1"
-                            }
-                        } else {
-                            ""
-                        },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                ""
+                            },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (status != null) {
+                    val statusColor = when (status) {
+                        ReceiverReachability.VERIFIED,
+                        ReceiverReachability.REACHABLE -> RECEIVER_AVAILABLE_COLOR
+                        ReceiverReachability.DIFFERENT_RECEIVER,
+                        ReceiverReachability.UNREACHABLE -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(
+                                statusColor,
+                                shape = MaterialTheme.shapes.small
+                            )
+                    )
+                }
+            }
+        }
+        DropdownMenu(
+            expanded = showDeviceMenu,
+            onDismissRequest = { showDeviceMenu = false },
+        ) {
+            onConfigure?.let { configure ->
+                DropdownMenuItem(
+                    text = { Text("Configure") },
+                    onClick = {
+                        showDeviceMenu = false
+                        configure()
+                    },
                 )
             }
-            if (status != null) {
-                val statusColor = when (status) {
-                    ReceiverReachability.VERIFIED,
-                    ReceiverReachability.REACHABLE -> RECEIVER_AVAILABLE_COLOR
-                    ReceiverReachability.DIFFERENT_RECEIVER,
-                    ReceiverReachability.UNREACHABLE -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                }
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .background(
-                            statusColor,
-                            shape = MaterialTheme.shapes.small
-                        )
+            onRemove?.let { remove ->
+                DropdownMenuItem(
+                    text = { Text("Remove") },
+                    onClick = {
+                        showDeviceMenu = false
+                        remove()
+                    },
                 )
             }
         }

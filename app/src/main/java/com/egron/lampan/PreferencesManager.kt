@@ -129,6 +129,11 @@ class PreferencesManager(context: Context) {
                 .toMutableSet()
                 .apply { addAll(receivers) }
             prefs.edit().putStringSet(networkKey, networkReceivers).apply()
+            val removedKey = removedNetworkDeviceIpsKey(networkName)
+            val stillRemoved = prefs.getStringSet(removedKey, emptySet())
+                .orEmpty()
+                .filterTo(mutableSetOf()) { removedIp -> removedIp != device.ip }
+            prefs.edit().putStringSet(removedKey, stillRemoved).apply()
         }
     }
 
@@ -172,6 +177,40 @@ class PreferencesManager(context: Context) {
             .sortedBy { it.name.lowercase() }
     }
 
+    fun removeAirPlayDeviceFromNetwork(device: AirPlayDevice, networkName: String) {
+        val networkKey = if (networkName.isUsableNetworkName()) {
+            networkReceiversKey(networkName)
+        } else {
+            KNOWN_RECEIVERS
+        }
+        val current = if (networkName.isUsableNetworkName()) {
+            networkReceiverAddresses(networkName)
+        } else {
+            prefs.getStringSet(KNOWN_RECEIVERS, emptySet()).orEmpty()
+        }
+        val remaining = current.filterTo(mutableSetOf()) { address ->
+            getAirPlayCapabilities(address)?.ip != device.ip
+        }
+        prefs.edit().apply {
+            putStringSet(networkKey, remaining)
+            if (networkName.isUsableNetworkName()) {
+                val removedKey = removedNetworkDeviceIpsKey(networkName)
+                val explicitlyRemoved = prefs.getStringSet(removedKey, emptySet())
+                    .orEmpty()
+                    .toMutableSet()
+                    .apply { add(device.ip) }
+                putStringSet(removedKey, explicitlyRemoved)
+            }
+        }.apply()
+    }
+
+    fun isAirPlayDeviceRemovedFromNetwork(device: AirPlayDevice, networkName: String): Boolean {
+        if (!networkName.isUsableNetworkName()) return false
+        val removed = prefs.getStringSet(removedNetworkDeviceIpsKey(networkName), emptySet())
+            .orEmpty()
+        return device.ip in removed
+    }
+
     private fun networkReceiverAddresses(networkName: String): Set<String> {
         val networkKey = networkReceiversKey(networkName)
         prefs.getStringSet(networkKey, null)?.let { return it.toSet() }
@@ -202,6 +241,9 @@ class PreferencesManager(context: Context) {
 
     private fun networkReceiversKey(networkName: String): String =
         "NETWORK_RECEIVERS_${preferenceDigest(networkName)}"
+
+    private fun removedNetworkDeviceIpsKey(networkName: String): String =
+        "REMOVED_NETWORK_DEVICE_IPS_${preferenceDigest(networkName)}"
 
     private fun preferenceDigest(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
