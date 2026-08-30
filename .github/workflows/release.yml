@@ -37,30 +37,40 @@ jobs:
           printf '%s' "$LAMPAN_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$LAMPAN_RELEASE_STORE_FILE"
           chmod 600 "$LAMPAN_RELEASE_STORE_FILE"
 
-      - name: Build Release APK
-        run: ./gradlew testStandardDebugUnitTest assembleStandardRelease
+      - name: Build release APKs
+        run: ./gradlew testStandardDebugUnitTest testNowPlayingDebugUnitTest assembleStandardRelease assembleNowPlayingRelease
 
       - name: Verify release signature
         run: |
           apksigner_path=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
           test -n "$apksigner_path"
-          apk=app/build/outputs/apk/standard/release/app-standard-release.apk
-          "$apksigner_path" verify --verbose "$apk"
-          actual=$(
-            "$apksigner_path" verify --print-certs "$apk" |
-              sed -nE 's/^.*certificate SHA-256 digest: ([0-9a-f]+)$/\1/p' |
-              head -n 1
-          )
-          test "$actual" = "$LAMPAN_RELEASE_CERT_SHA256"
+          for apk in \
+            app/build/outputs/apk/standard/release/app-standard-release.apk \
+            app/build/outputs/apk/nowPlaying/release/app-nowPlaying-release.apk
+          do
+            "$apksigner_path" verify --verbose "$apk"
+            actual=$(
+              "$apksigner_path" verify --print-certs "$apk" |
+                sed -nE 's/^.*certificate SHA-256 digest: ([0-9a-f]+)$/\1/p' |
+                head -n 1
+            )
+            test "$actual" = "$LAMPAN_RELEASE_CERT_SHA256"
+          done
 
-      - name: Rename APK
-        run: mv app/build/outputs/apk/standard/release/app-standard-release.apk app/build/outputs/apk/standard/release/lampan-${{ github.ref_name }}.apk
+      - name: Rename APKs
+        run: |
+          mv app/build/outputs/apk/standard/release/app-standard-release.apk \
+            app/build/outputs/apk/standard/release/lampan-${{ github.ref_name }}.apk
+          mv app/build/outputs/apk/nowPlaying/release/app-nowPlaying-release.apk \
+            app/build/outputs/apk/nowPlaying/release/lampan-${{ github.ref_name }}-nowPlaying.apk
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: app/build/outputs/apk/standard/release/lampan-${{ github.ref_name }}.apk
+          files: |
+            app/build/outputs/apk/standard/release/lampan-${{ github.ref_name }}.apk
+            app/build/outputs/apk/nowPlaying/release/lampan-${{ github.ref_name }}-nowPlaying.apk
           generate_release_notes: true
 
       - name: Remove release signing key

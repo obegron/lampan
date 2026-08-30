@@ -60,13 +60,17 @@ with Android Keystore.
 
 ## Build variants
 
-GitHub releases use the **`standard`** variant. It contains the complete streaming
-implementation and does not declare Android Notification Access.
+GitHub releases provide two APKs:
 
-The opt-in **`nowPlaying`** variant can also send the active title, artist,
-progress, and available cover art to compatible AirPlay 2 receivers. It declares
-a notification-listener service and requires the user to grant Notification
-Access from Lampan's settings screen.
+- **`lampan-vX.Y.Z.apk`** is the `standard` variant. It contains the complete
+  streaming implementation and does not declare Android Notification Access.
+- **`lampan-vX.Y.Z-nowPlaying.apk`** is the opt-in media variant. It can also send
+  the active title, artist, progress, and available cover art to compatible
+  AirPlay 2 receivers. It declares a notification-listener service and requires
+  the user to grant Notification Access from Lampan's settings screen.
+
+Both variants use the same application ID and signing key, so they update or
+replace one another and cannot be installed side by side.
 
 Build either development APK with:
 
@@ -76,9 +80,8 @@ Build either development APK with:
 ```
 
 Outputs are written below `app/build/outputs/apk/standard/` and
-`app/build/outputs/apk/nowPlaying/`. Both variants use the same application ID and
-cannot coexist. Android may require the signed GitHub build to be uninstalled
-before installing a locally debug-signed build.
+`app/build/outputs/apk/nowPlaying/`. Android may require the signed GitHub build
+to be uninstalled before installing a locally debug-signed build.
 
 Run both unit-test variants with:
 
