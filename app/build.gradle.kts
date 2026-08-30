@@ -36,8 +36,8 @@ android {
         applicationId = "com.egron.lampan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 25
-        versionName = "0.5.1"
+        versionCode = 26
+        versionName = "0.5.2"
         buildConfigField(
             "String",
             "SOURCE_REVISION_TIME_UTC",
@@ -92,6 +92,10 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"

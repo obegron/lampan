@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.2
+
+- Exclude Android Gradle Plugin dependency metadata from APK signing blocks for
+  F-Droid scanner compatibility.
+- Publish both the Standard and opt-in Now Playing APKs in GitHub releases.
+
 ## v0.5.1
 
 - Correct the Android version name and code after the `v0.5.0` tag retained

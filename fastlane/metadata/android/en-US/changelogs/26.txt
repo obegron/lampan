@@ -1,0 +1,1 @@
+Exclude Android Gradle Plugin dependency metadata from APK signing blocks for F-Droid compatibility. GitHub releases now provide both the Standard and opt-in Now Playing APKs.
