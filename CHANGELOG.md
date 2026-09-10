@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Anchor group playback and NTP responses to a shared monotonic clock with
+  sample-level precision. Speaker joins preserve existing receiver timelines,
+  and live delay changes shift the established mapping instead of resetting it.
+- Add microphone calibration while streaming: move near each speaker, measure
+  three quiet chirps, then verify the calculated delays in a second pass before
+  saving. Cancellation restores previous settings and leaving the screen stops
+  recording. Phone/speaker hardware validation is still required.
+
+- Request the same two-second render latency on AirPlay 1 and AirPlay 2,
+  removing the sender's 1.75-second latency mismatch in mixed groups. This also
+  increases standalone AirPlay 1 buffering; acoustic alignment still needs
+  verification on hardware.
+- Start saved group timing corrections at zero for the corrected latency model.
+
 ## v0.5.2
 
 - Exclude Android Gradle Plugin dependency metadata from APK signing blocks for

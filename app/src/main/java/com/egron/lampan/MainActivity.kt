@@ -178,7 +178,7 @@ private data class AddDeviceReturnState(
     val ipAddress: String,
 )
 
-private data class GroupTimingReceiver(
+internal data class GroupTimingReceiver(
     val address: String,
     val key: String,
     val name: String,
@@ -392,6 +392,7 @@ fun MainScreen(
     }.sortedBy { it.name.lowercase() }
     val groupTimingKeys = groupTimingReceivers.map(GroupTimingReceiver::key)
     val timingGroupIdentity = groupSyncIdentity(groupTimingKeys)
+    var showCalibration by remember(timingGroupIdentity, isConnected) { mutableStateOf(false) }
     var groupSyncProfile by remember(timingGroupIdentity) {
         mutableStateOf(
             if (groupTimingKeys.distinct().size > 1) {
@@ -1551,10 +1552,21 @@ fun MainScreen(
 
             if (groupTimingReceivers.size > 1 && groupSyncProfile != null) {
                 val profile = requireNotNull(groupSyncProfile)
+                if (showCalibration && isConnected) {
+                    CalibrationDialog(
+                        receivers = groupTimingReceivers,
+                        onSaved = { updated ->
+                            groupSyncProfile = updated
+                            prefsManager.saveGroupSyncProfile(groupTimingKeys, updated)
+                        },
+                        onDismiss = { showCalibration = false },
+                    )
+                }
                 SpeakerTimingCard(
                     receivers = groupTimingReceivers,
                     profile = profile,
                     isConnected = isConnected,
+                    onCalibrate = { showCalibration = true },
                     onSelectReference = { receiverKey ->
                         val updated = profile.selectReference(groupTimingKeys, receiverKey)
                         groupSyncProfile = updated
@@ -1945,6 +1957,7 @@ private fun SpeakerTimingCard(
     receivers: List<GroupTimingReceiver>,
     profile: GroupSyncProfile,
     isConnected: Boolean,
+    onCalibrate: () -> Unit,
     onSelectReference: (String) -> Unit,
     onDelayChange: (String, Int) -> Unit,
     onDelayChangeFinished: (String, Int) -> Unit,
@@ -1952,6 +1965,9 @@ private fun SpeakerTimingCard(
     val referenceName = receivers.firstOrNull { it.key == profile.referenceKey }?.name
         ?: receivers.first().name
     SectionCard(title = "Speaker timing") {
+        OutlinedButton(onClick = onCalibrate, enabled = isConnected) {
+            Text("Calibrate with phone microphone")
+        }
         Text(
             text = "Use the receiver you hear latest as the reference, then delay the " +
                 "others until they match. " + if (isConnected) {

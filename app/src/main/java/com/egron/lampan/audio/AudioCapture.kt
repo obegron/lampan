@@ -84,6 +84,7 @@ class AudioCapture(
 
             captureJob = scope.launch {
                 val buffer = ByteArray(352 * 4) 
+                var filled = 0
                 var packetsRead = 0
                 var capturedSignal = false
                 var silenceWarningLogged = false
@@ -91,9 +92,12 @@ class AudioCapture(
                 onStatus("AudioCapture: Entering read loop...")
                 
                 while (isActive) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                    val read = audioRecord?.read(buffer, filled, buffer.size - filled) ?: 0
                     if (read > 0) {
-                        val data = buffer.copyOfRange(0, read)
+                        filled += read
+                        if (filled < buffer.size) continue
+                        val data = buffer.copyOf()
+                        filled = 0
                         val peak = pcm16LittleEndianPeak(data)
                         onAudioData(data)
                         packetsRead++

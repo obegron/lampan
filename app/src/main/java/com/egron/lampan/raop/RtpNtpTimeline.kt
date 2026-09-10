@@ -5,7 +5,7 @@ internal class RtpNtpTimeline(
     private val sampleRate: Long = 44_100L,
 ) {
     private var anchorRtpTimestamp: Long? = null
-    private var anchorUnixTimeMillis = 0L
+    private var anchorUnixTimeNanos = 0L
 
     init {
         require(sampleRate > 0) { "Sample rate must be positive" }
@@ -14,21 +14,36 @@ internal class RtpNtpTimeline(
     @Synchronized
     fun reset() {
         anchorRtpTimestamp = null
-        anchorUnixTimeMillis = 0L
+        anchorUnixTimeNanos = 0L
     }
 
     @Synchronized
     fun synchronizeAt(rtpTimestamp: Long, unixTimeMillis: Long) {
         anchorRtpTimestamp = rtpTimestamp and RTP_TIMESTAMP_MASK
-        anchorUnixTimeMillis = unixTimeMillis
+        anchorUnixTimeNanos = unixTimeMillis * 1_000_000L
     }
 
     @Synchronized
-    fun unixTimeAt(rtpTimestamp: Long, fallbackUnixTimeMillis: Long): Long {
-        val anchor = anchorRtpTimestamp ?: return fallbackUnixTimeMillis
-        val current = rtpTimestamp and RTP_TIMESTAMP_MASK
-        val elapsedFrames = (current - anchor) and RTP_TIMESTAMP_MASK
-        return anchorUnixTimeMillis + elapsedFrames * 1_000L / sampleRate
+    fun synchronizeAtNanos(rtpTimestamp: Long, unixTimeNanos: Long) {
+        anchorRtpTimestamp = rtpTimestamp and RTP_TIMESTAMP_MASK
+        anchorUnixTimeNanos = unixTimeNanos
+    }
+
+    @Synchronized
+    fun shiftByMillis(deltaMillis: Int) {
+        check(anchorRtpTimestamp != null) { "Timeline is not anchored" }
+        anchorUnixTimeNanos += deltaMillis * 1_000_000L
+    }
+
+    @Synchronized
+    fun unixTimeAt(rtpTimestamp: Long, fallbackUnixTimeMillis: Long): Long =
+        unixNanosAt(rtpTimestamp, fallbackUnixTimeMillis * 1_000_000L) / 1_000_000L
+
+    @Synchronized
+    fun unixNanosAt(rtpTimestamp: Long, fallbackUnixNanos: Long): Long {
+        val anchor = anchorRtpTimestamp ?: return fallbackUnixNanos
+        val elapsedFrames = ((rtpTimestamp and RTP_TIMESTAMP_MASK) - anchor) and RTP_TIMESTAMP_MASK
+        return anchorUnixTimeNanos + elapsedFrames * 1_000_000_000L / sampleRate
     }
 
     private companion object {
