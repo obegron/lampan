@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0
 
 - Anchor group playback and NTP responses to a shared monotonic clock with
   sample-level precision. Speaker joins preserve existing receiver timelines,
@@ -8,8 +8,7 @@
 - Add microphone calibration while streaming: move near each speaker, measure
   three quiet chirps, then verify the calculated delays in a second pass before
   saving. Cancellation restores previous settings and leaving the screen stops
-  recording. Phone/speaker hardware validation is still required.
-
+  recording. Calibration remains experimental across phone/speaker combinations.
 - Request the same two-second render latency on AirPlay 1 and AirPlay 2,
   removing the sender's 1.75-second latency mismatch in mixed groups. This also
   increases standalone AirPlay 1 buffering; acoustic alignment still needs
