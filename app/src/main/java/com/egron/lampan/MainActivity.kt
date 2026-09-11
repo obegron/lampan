@@ -20,10 +20,14 @@ import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -38,11 +42,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -59,6 +67,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -70,6 +79,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -105,10 +118,17 @@ import kotlin.math.roundToInt
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             val preferences = remember { PreferencesManager(this@MainActivity) }
             var isDarkTheme by rememberSaveable {
                 mutableStateOf(preferences.isDarkThemeEnabled())
+            }
+            SideEffect {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT) { isDarkTheme },
+                    navigationBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT) { isDarkTheme },
+                )
             }
             LampanTheme(darkTheme = isDarkTheme) {
                 Surface(
@@ -302,6 +322,8 @@ fun MainScreen(
         mutableStateOf(prefsManager.isDebugInformationEnabled())
     }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showManualEntry by rememberSaveable { mutableStateOf(initialIpAddress.isNotBlank() && initialDevice == null) }
+    var showReceiverOptions by rememberSaveable { mutableStateOf(false) }
     var nowPlayingInformationEnabled by remember {
         mutableStateOf(prefsManager.isNowPlayingInformationEnabled())
     }
@@ -321,6 +343,7 @@ fun MainScreen(
 
     // Discovery State
     var isScanning by remember { mutableStateOf(false) }
+    var hasSearched by remember { mutableStateOf(false) }
     var discoveredDevices by remember { mutableStateOf(emptyList<AirPlayDevice>()) }
     val discovery = remember { AirPlayDiscovery(context) }
 
@@ -717,6 +740,7 @@ fun MainScreen(
 
     LaunchedEffect(isScanning) {
         if (isScanning) {
+            hasSearched = true
             discovery.discoverDevices().collect {
                 discoveredDevices = it
                 receiverReachabilityByAddress = receiverReachabilityByAddress +
@@ -724,6 +748,13 @@ fun MainScreen(
                         preferredReceiverAddress(device) to ReceiverReachability.REACHABLE
                     }
             }
+        }
+    }
+
+    LaunchedEffect(isScanning) {
+        if (isScanning) {
+            delay(15_000)
+            isScanning = false
         }
     }
 
@@ -836,6 +867,34 @@ fun MainScreen(
         )
     }
 
+    val findReceivers: () -> Unit = {
+        if (!isAddingDevice && knownDevices.isNotEmpty()) {
+            addDeviceReturnState = AddDeviceReturnState(
+                device = selectedDevice,
+                receiverAddresses = selectedReceiverAddresses,
+                protocol = receiverProtocol,
+                ipAddress = ipAddress,
+            )
+            if (!isConnected) {
+                selectedDevice = null
+                selectedReceiverAddresses = emptySet()
+                receiverProtocol = AirPlayProtocol.AIRPLAY_1
+                ipAddress = ""
+            }
+            showManualEntry = false
+            showReceiverOptions = false
+            isAddingDevice = true
+        } else if (isScanning) {
+            isScanning = false
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                scanPermissionLauncher.launch(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+            } else {
+                isScanning = true
+            }
+        }
+    }
+
     val backgroundBrush = Brush.linearGradient(
         colors = listOf(
             MaterialTheme.colorScheme.background,
@@ -852,7 +911,9 @@ fun MainScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundBrush)
-            .padding(16.dp)
+            .safeDrawingPadding()
+            .imePadding()
+            .padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
         if (showSettings) {
             SettingsScreen(
@@ -895,26 +956,16 @@ fun MainScreen(
             ) {
             HeaderCard(
                 title = "Lampan",
-                subtitle = "AirPlay audio streaming",
+                subtitle = "Your audio. Any room.",
                 isConnected = isConnected,
                 currentSsid = currentSsid,
                 onOpenSettings = { showSettings = true },
             )
 
-            SectionCard(title = "Receiver") {
-                if (knownDevices.isNotEmpty()) {
+            SectionCard(title = if (isAddingDevice || knownDevices.isEmpty()) "Find a speaker" else "Choose speakers") {
+                if (knownDevices.isNotEmpty() && !isAddingDevice) {
                     Text(
-                        text = if (
-                            currentSsid.isNotEmpty() && currentSsid != "<unknown ssid>"
-                        ) {
-                            "Known devices on $currentSsid"
-                        } else {
-                            "Known devices"
-                        },
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                    Text(
-                        text = "Long-press a device to configure or remove it.",
+                        text = "Select one or more to play together.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -937,6 +988,7 @@ fun MainScreen(
                                     receiverReachabilityByAddress[deviceAddress]
                                 },
                                 onConfigure = {
+                                    showReceiverOptions = true
                                     selectedDevice = device
                                     receiverProtocol = device.preferredProtocol
                                     isAddingDevice = false
@@ -998,12 +1050,11 @@ fun MainScreen(
                                         selectedReceiverAddresses =
                                             selectedReceiverAddresses + deviceAddress
                                     }
-                                } else {
-                                    selectedDevice = device
-                                    receiverProtocol = protocol
-                                    isAddingDevice = false
-                                    addDeviceReturnState = null
-                                    updateIpAddress("${device.ip}:$port")
+                                } else if (!isConnected) {
+                                    selectedReceiverAddresses = emptySet()
+                                    selectedDevice = null
+                                    showReceiverOptions = false
+                                    updateIpAddress("")
                                 }
                             }
                         }
@@ -1017,7 +1068,7 @@ fun MainScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Add receiver", style = MaterialTheme.typography.titleSmall)
+                        Text("Connect over Wi-Fi", style = MaterialTheme.typography.titleSmall)
                         if (addDeviceReturnState != null) {
                             TextButton(
                                 onClick = {
@@ -1040,42 +1091,143 @@ fun MainScreen(
                         }
                     }
                     Text(
-                        text = "Scan for a receiver or enter its IP and port manually.",
+                        text = "Keep your phone and AirPlay speaker or TV on the same Wi-Fi network.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    OutlinedTextField(
-                        value = ipAddress,
-                        onValueChange = {
-                            val remembered = normalizedReceiverAddress(it)
-                                .takeIf(String::isNotEmpty)
-                                ?.let(prefsManager::getAirPlayCapabilities)
-                            selectedDevice = remembered
-                            if (remembered != null) {
-                                receiverProtocol = remembered.preferredProtocol
-                                selectedReceiverAddresses =
-                                    setOf(preferredReceiverAddress(remembered))
-                                isAddingDevice = false
-                                addDeviceReturnState = null
-                            } else {
-                                selectedReceiverAddresses = emptySet()
+                    Button(
+                        onClick = findReceivers,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    ) {
+                        Text(if (isScanning) "Stop search" else "Find speakers")
+                    }
+                    if (isScanning) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Text("Looking for AirPlay speakers…", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text(
+                            "Nothing showing up? Check that your speaker is on and AirPlay is enabled.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (
+                        (isAddingDevice || knownDevices.isEmpty()) &&
+                        discoveredDevices.isNotEmpty()
+                    ) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Nearby speakers",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 180.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(discoveredDevices) { device ->
+                                DeviceRow(
+                                    device = device,
+                                    status = if (
+                                        preferredReceiverAddress(device) in pendingReceiverAddresses
+                                    ) {
+                                        ReceiverReachability.CHECKING
+                                    } else {
+                                        ReceiverReachability.REACHABLE
+                                    },
+                                ) {
+                                    val rememberedPreference = knownDevices
+                                        .firstOrNull { it.ip == device.ip }
+                                        ?.protocolPreference
+                                    val selected = device.copy(
+                                        protocolPreference = rememberedPreference,
+                                    )
+                                    val protocol = selected.preferredProtocol
+                                    val port = requireNotNull(selected.portFor(protocol))
+                                    selectedDevice = selected
+                                    receiverProtocol = protocol
+                                    prefsManager.saveAirPlayCapabilities(selected, currentSsid)
+                                    knownDevices = prefsManager.getKnownAirPlayDevices(currentSsid)
+                                    isAddingDevice = false
+                                    addDeviceReturnState = null
+                                    updateIpAddress("${selected.ip}:$port")
+                                    isScanning = false
+                                    val address = preferredReceiverAddress(selected)
+                                    if (isConnected) {
+                                        val missingAccess = protocol == AirPlayProtocol.AIRPLAY_2 &&
+                                            selected.airPlay2RequiresPassword != false &&
+                                            !airPlay2CredentialStore.contains(address) &&
+                                            !airPlay2CredentialStore.containsPassword(address)
+                                        when {
+                                            address in selectedReceiverAddresses -> Unit
+                                            missingAccess -> errorMessage =
+                                                "Connect to ${selected.name} alone once to save its " +
+                                                    "AirPlay 2 password before adding it live"
+                                            pendingReceiverAddresses.isEmpty() -> {
+                                                pendingReceiverAddresses = setOf(address)
+                                                addReceiverToStream(context, address)
+                                            }
+                                        }
+                                    } else {
+                                        selectedReceiverAddresses = setOf(address)
+                                    }
+                                }
                             }
-                            updateIpAddress(it)
-                        },
-                        label = { Text("Receiver IP Address") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Number,
-                            imeAction = ImeAction.Done
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onDone = { focusManager.clearFocus() }
-                        ),
-                        enabled = !isConnected
-                    )
+                        }
+                    }
+
+                    if (hasSearched && !isScanning && discoveredDevices.isEmpty()) {
+                        Text("No speakers found", style = MaterialTheme.typography.titleSmall)
+                        Text("Check your speaker’s Wi-Fi and AirPlay settings, then search again or enter its address below.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(onClick = { showManualEntry = !showManualEntry }) {
+                        Text(if (showManualEntry) "Hide manual setup" else "Enter address manually")
+                    }
+                    if (showManualEntry) {
+                        OutlinedTextField(
+                            value = ipAddress,
+                            onValueChange = {
+                                val remembered = normalizedReceiverAddress(it)
+                                    .takeIf(String::isNotEmpty)
+                                    ?.let(prefsManager::getAirPlayCapabilities)
+                                selectedDevice = remembered
+                                if (remembered != null) {
+                                    receiverProtocol = remembered.preferredProtocol
+                                    selectedReceiverAddresses =
+                                        setOf(preferredReceiverAddress(remembered))
+                                    isAddingDevice = false
+                                    addDeviceReturnState = null
+                                } else {
+                                    selectedReceiverAddresses = emptySet()
+                                }
+                                updateIpAddress(it)
+                            },
+                            label = { Text("IP address and port") },
+                            placeholder = { Text("192.168.1.20:7000") },
+                            supportingText = { Text("Find the address in your speaker’s network settings.") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Uri,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onDone = { focusManager.clearFocus() }
+                            ),
+                            enabled = !isConnected
+                        )
+                    }
                 }
 
                 if (receiverReachability != ReceiverReachability.NONE) {
@@ -1088,9 +1240,9 @@ fun MainScreen(
                         else -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
                     val reachabilityText = when (receiverReachability) {
-                        ReceiverReachability.CHECKING -> "Checking AirPlay receiver…"
-                        ReceiverReachability.VERIFIED -> "AirPlay receiver verified"
-                        ReceiverReachability.REACHABLE -> "AirPlay receiver reachable"
+                        ReceiverReachability.CHECKING -> "Checking connection…"
+                        ReceiverReachability.VERIFIED -> "Ready to stream"
+                        ReceiverReachability.REACHABLE -> "Ready to stream"
                         ReceiverReachability.DIFFERENT_RECEIVER -> if (
                             activeReceiverAddresses.size > 1
                         ) {
@@ -1103,7 +1255,7 @@ fun MainScreen(
                         ) {
                             "A selected AirPlay receiver is unavailable"
                         } else {
-                            "AirPlay receiver unavailable"
+                            "Speaker unavailable · check its Wi-Fi"
                         }
                         ReceiverReachability.NONE -> ""
                     }
@@ -1111,14 +1263,11 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(
-                                    reachabilityColor,
-                                    shape = MaterialTheme.shapes.small,
-                                ),
-                        )
+                        if (receiverReachability == ReceiverReachability.CHECKING) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Box(modifier = Modifier.size(8.dp).background(reachabilityColor, MaterialTheme.shapes.small))
+                        }
                         Text(
                             text = reachabilityText,
                             style = MaterialTheme.typography.bodySmall,
@@ -1127,29 +1276,26 @@ fun MainScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 if (selectedDevice != null) {
                     Text(
                         text = if (selectedReceiverAddresses.size > 1) {
-                            "${selectedReceiverAddresses.size} receivers selected; Lampan will " +
-                                "map their AirPlay 1 and AirPlay 2 RTP streams to one shared " +
-                                "network-time start."
+                            "${selectedReceiverAddresses.size} speakers selected · group playback is experimental."
                         } else {
-                            "${selectedDevice?.protocolLabel} capabilities remembered; " +
-                                "Lampan will use " +
-                            if (receiverProtocol == AirPlayProtocol.AIRPLAY_2) {
-                                "AirPlay 2."
-                            } else {
-                                "AirPlay 1."
-                            }
+                            "Play on ${selectedDevice?.name}"
                         },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
+                    if (showReceiverOptions) {
+                        Text("${selectedDevice?.ip} · ${selectedDevice?.protocolLabel}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = { showReceiverOptions = false }) { Text("Hide connection options") }
+                    }
                     val selectableDevice = selectedDevice
                     if (
-                        selectableDevice?.airPlay1Port != null &&
+                        showReceiverOptions && selectableDevice?.airPlay1Port != null &&
                         selectableDevice.airPlay2Port != null &&
                         selectedReceiverAddresses.size <= 1
                     ) {
@@ -1201,15 +1347,13 @@ fun MainScreen(
                             }
                         }
                         Text(
-                            text = "AirPlay 1 is the safer default. Choose AirPlay 2 for " +
-                                "receivers such as the Sony TV that work with Android's " +
-                                "unprivileged NTP timing path.",
+                            text = "Use AirPlay 1 for most speakers. Try AirPlay 2 if your TV or speaker requires it.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                } else {
-                    Text("Manual connection protocol", style = MaterialTheme.typography.titleSmall)
+                } else if (showManualEntry && (isAddingDevice || knownDevices.isEmpty())) {
+                    Text("Connection type", style = MaterialTheme.typography.titleSmall)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1245,7 +1389,7 @@ fun MainScreen(
                     }
                 }
 
-                if (receiverProtocol == AirPlayProtocol.AIRPLAY_2 && !isConnected) {
+                if (receiverProtocol == AirPlayProtocol.AIRPLAY_2 && !isConnected && (selectedDevice != null || showManualEntry)) {
                     Spacer(modifier = Modifier.height(8.dp))
                     val needsPassword = selectedDevice?.airPlay2RequiresPassword != false
                     if (hasSavedAirPlay2Password) {
@@ -1299,9 +1443,7 @@ fun MainScreen(
                     }
                     if (!hasSavedAirPlay2Pairing && !hasSavedAirPlay2Password) {
                         Text(
-                            text = "AirPlay 2 pairs securely, then streams captured phone audio as " +
-                                "encrypted realtime ALAC. Lampan uses transient password pairing " +
-                                "when supported and saves an identity when registration is required.",
+                            text = "Lampan saves access securely after you connect.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1335,7 +1477,7 @@ fun MainScreen(
                             modifier = Modifier.fillMaxWidth(),
                             enabled = !isConnecting,
                         ) {
-                            Text("Ask Receiver to Show Code")
+                            Text("Show code on speaker or TV")
                         }
                     } else if (
                         needsPassword &&
@@ -1350,50 +1492,11 @@ fun MainScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedButton(
-                        onClick = {
-                            if (!isAddingDevice && knownDevices.isNotEmpty()) {
-                                addDeviceReturnState = AddDeviceReturnState(
-                                    device = selectedDevice,
-                                    receiverAddresses = selectedReceiverAddresses,
-                                    protocol = receiverProtocol,
-                                    ipAddress = ipAddress,
-                                )
-                                if (!isConnected) {
-                                    selectedDevice = null
-                                    selectedReceiverAddresses = emptySet()
-                                    receiverProtocol = AirPlayProtocol.AIRPLAY_1
-                                    ipAddress = ""
-                                }
-                                isAddingDevice = true
-                            } else if (isScanning) {
-                                isScanning = false
-                            } else {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    scanPermissionLauncher.launch(android.Manifest.permission.NEARBY_WIFI_DEVICES)
-                                } else {
-                                    isScanning = true
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(
-                            when {
-                                !isAddingDevice && knownDevices.isNotEmpty() -> "Add Device"
-                                isScanning -> "Stop Scan"
-                                else -> "Scan"
-                            },
-                        )
-                    }
-
-                    Button(
+                    if ((!isAddingDevice || showManualEntry) && !isConnected) Button(
                         onClick = {
                             val (host, _) = parseIpAndPort(ipAddress)
                             val missingGroupAccess = if (selectedReceiverAddresses.size > 1) {
@@ -1451,17 +1554,24 @@ fun MainScreen(
                                 }
                             }
                         },
-                        modifier = Modifier.weight(1f),
-                        enabled = !isConnected && !isConnecting,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        enabled = !isConnected && !isConnecting && ipAddress.isNotBlank(),
                     ) {
                         Text(
                             when {
-                                isConnecting -> "Connecting..."
+                                isConnecting -> "Connecting…"
+                                receiverReachability == ReceiverReachability.UNREACHABLE -> "Retry connection"
                                 selectedReceiverAddresses.size > 1 ->
-                                    "Stream to ${selectedReceiverAddresses.size}"
-                                else -> "Stream"
+                                    "Stream to ${selectedReceiverAddresses.size} speakers"
+                                else -> "Start streaming"
                             },
                         )
+                    }
+                }
+
+                if (!isAddingDevice && knownDevices.isNotEmpty()) {
+                    TextButton(onClick = findReceivers, modifier = Modifier.fillMaxWidth()) {
+                        Text("Add speaker")
                     }
                 }
 
@@ -1478,75 +1588,21 @@ fun MainScreen(
                             containerColor = MaterialTheme.colorScheme.secondary
                         )
                     ) {
-                        Text("Disconnect")
+                        Text("Stop streaming")
                     }
                 }
+            }
 
-                if (
-                    (isAddingDevice || knownDevices.isEmpty()) &&
-                    discoveredDevices.isNotEmpty()
-                ) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Discovered Devices",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 180.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(discoveredDevices) { device ->
-                            DeviceRow(
-                                device = device,
-                                status = if (
-                                    preferredReceiverAddress(device) in pendingReceiverAddresses
-                                ) {
-                                    ReceiverReachability.CHECKING
-                                } else {
-                                    ReceiverReachability.REACHABLE
-                                },
-                            ) {
-                                val rememberedPreference = knownDevices
-                                    .firstOrNull { it.ip == device.ip }
-                                    ?.protocolPreference
-                                val selected = device.copy(
-                                    protocolPreference = rememberedPreference,
-                                )
-                                val protocol = selected.preferredProtocol
-                                val port = requireNotNull(selected.portFor(protocol))
-                                selectedDevice = selected
-                                receiverProtocol = protocol
-                                prefsManager.saveAirPlayCapabilities(selected, currentSsid)
-                                knownDevices = prefsManager.getKnownAirPlayDevices(currentSsid)
-                                isAddingDevice = false
-                                addDeviceReturnState = null
-                                updateIpAddress("${selected.ip}:$port")
-                                isScanning = false
-                                val address = preferredReceiverAddress(selected)
-                                if (isConnected) {
-                                    val missingAccess = protocol == AirPlayProtocol.AIRPLAY_2 &&
-                                        selected.airPlay2RequiresPassword != false &&
-                                        !airPlay2CredentialStore.contains(address) &&
-                                        !airPlay2CredentialStore.containsPassword(address)
-                                    when {
-                                        address in selectedReceiverAddresses -> Unit
-                                        missingAccess -> errorMessage =
-                                            "Connect to ${selected.name} alone once to save its " +
-                                                "AirPlay 2 password before adding it live"
-                                        pendingReceiverAddresses.isEmpty() -> {
-                                            pendingReceiverAddresses = setOf(address)
-                                            addReceiverToStream(context, address)
-                                        }
-                                    }
-                                } else {
-                                    selectedReceiverAddresses = setOf(address)
-                                }
-                            }
-                        }
-                    }
+            if (knownDevices.isEmpty() && !showManualEntry && !isScanning) {
+                Column(modifier = Modifier.padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Your music, out loud", style = MaterialTheme.typography.titleMedium)
+                    Text("Connect a speaker, allow Android to share audio, then play music or a podcast in another app.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("Some apps restrict audio sharing. A short playback delay is normal.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
 
@@ -1819,7 +1875,9 @@ private fun SettingsSwitchRow(
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().toggleable(
+            value = checked, role = Role.Switch, onValueChange = onCheckedChange,
+        ).padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1831,15 +1889,14 @@ private fun SettingsSwitchRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 
 @Composable
 private fun AboutRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
     ) {
         Text(
             label,
@@ -1863,38 +1920,23 @@ private fun HeaderCard(
     currentSsid: String,
     onOpenSettings: () -> Unit,
 ) {
-    SectionCard {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, style = MaterialTheme.typography.headlineLarge)
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Text(title, style = MaterialTheme.typography.headlineLarge)
+                Text(subtitle, style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Column(horizontalAlignment = Alignment.End) {
-                IconButton(onClick = onOpenSettings) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_settings),
-                        contentDescription = "Open settings",
-                    )
-                }
-                StatusPill(isConnected = isConnected)
+            IconButton(onClick = onOpenSettings) {
+                Icon(painterResource(R.drawable.ic_settings), contentDescription = "Open settings")
             }
         }
-
-        Spacer(modifier = Modifier.height(12.dp))
-        if (currentSsid.isNotEmpty() && currentSsid != "<unknown ssid>") {
-            Text(
-                text = "Wi-Fi: $currentSsid",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StatusPill(isConnected)
+            if (currentSsid.isNotEmpty() && currentSsid != "<unknown ssid>") {
+                Text(currentSsid, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
@@ -1917,7 +1959,7 @@ private fun StatusPill(isConnected: Boolean) {
         shape = MaterialTheme.shapes.small
     ) {
         Text(
-            text = if (isConnected) "Connected" else "Idle",
+            text = if (isConnected) "Streaming" else "Not streaming",
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             style = MaterialTheme.typography.bodySmall,
             color = textColor
@@ -1932,8 +1974,8 @@ private fun SectionCard(
 ) {
     Surface(
         shape = MaterialTheme.shapes.large,
-        tonalElevation = 2.dp,
-        shadowElevation = 2.dp,
+        tonalElevation = 0.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
         color = MaterialTheme.colorScheme.surface
     ) {
         Column(
@@ -2107,7 +2149,12 @@ private fun DeviceRow(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
+                .semantics {
+                    this.selected = selected
+                    stateDescription = if (selected) "Selected" else "Not selected"
+                }
                 .combinedClickable(
+                    role = Role.Checkbox,
                     onClick = onClick,
                     onLongClick = if (onConfigure != null || onRemove != null) {
                         { showDeviceMenu = true }
@@ -2123,47 +2170,31 @@ private fun DeviceRow(
             },
         ) {
             Row(
-                modifier = Modifier.padding(12.dp),
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Checkbox(checked = selected, onCheckedChange = null)
+                Spacer(modifier = Modifier.size(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(text = device.name, style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        text = "${device.ip}:${device.portFor(device.preferredProtocol)} · " +
-                            device.protocolLabel + if (
-                                device.airPlay1Port != null && device.airPlay2Port != null
-                            ) {
-                                " · uses " + if (
-                                    device.preferredProtocol == AirPlayProtocol.AIRPLAY_2
-                                ) {
-                                    "AirPlay 2"
-                                } else {
-                                    "AirPlay 1"
-                                }
-                            } else {
-                                ""
-                            },
+                        text = when (status) {
+                            ReceiverReachability.CHECKING -> device.protocolLabel
+                            ReceiverReachability.UNREACHABLE -> "Unavailable"
+                            ReceiverReachability.DIFFERENT_RECEIVER -> "Address changed"
+                            ReceiverReachability.VERIFIED, ReceiverReachability.REACHABLE -> "Available"
+                            else -> device.protocolLabel
+                        } + if (selected) " · Selected" else "",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (status != null) {
-                    val statusColor = when (status) {
-                        ReceiverReachability.VERIFIED,
-                        ReceiverReachability.REACHABLE -> RECEIVER_AVAILABLE_COLOR
-                        ReceiverReachability.DIFFERENT_RECEIVER,
-                        ReceiverReachability.UNREACHABLE -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                if (onConfigure != null || onRemove != null) {
+                    IconButton(onClick = { showDeviceMenu = true }) {
+                        Icon(painterResource(R.drawable.ic_more_vert),
+                            contentDescription = "Options for ${device.name}")
                     }
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .background(
-                                statusColor,
-                                shape = MaterialTheme.shapes.small
-                            )
-                    )
                 }
             }
         }
@@ -2173,7 +2204,7 @@ private fun DeviceRow(
         ) {
             onConfigure?.let { configure ->
                 DropdownMenuItem(
-                    text = { Text("Configure") },
+                    text = { Text("Connection options") },
                     onClick = {
                         showDeviceMenu = false
                         configure()
