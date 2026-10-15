@@ -236,8 +236,10 @@ class PreferencesManager(context: Context) {
         return "AIRPLAY_CAP_${preferenceDigest(receiver)}"
     }
 
+    // Earlier corrections may compensate for the former AP1/AP2 latency
+    // mismatch. Keep those stored values, but start the corrected model at zero.
     private fun groupSyncPrefix(receiverKeys: Collection<String>): String =
-        "GROUP_SYNC_${preferenceDigest(groupSyncIdentity(receiverKeys))}"
+        "GROUP_SYNC_V2_${preferenceDigest(groupSyncIdentity(receiverKeys))}"
 
     private fun networkReceiversKey(networkName: String): String =
         "NETWORK_RECEIVERS_${preferenceDigest(networkName)}"

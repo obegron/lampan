@@ -11,9 +11,12 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.egron.lampan.R
+import com.egron.lampan.calibration.CalibrationProtocol
+import com.egron.lampan.calibration.CalibrationSignal
 import com.egron.lampan.audio.AudioCapture
 import com.egron.lampan.raop.AirPlay2Session
 import com.egron.lampan.raop.AirPlayProtocol
+import com.egron.lampan.raop.NetworkClock
 import com.egron.lampan.raop.RaopSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +31,16 @@ class AudioCaptureService : Service() {
     private var receiverSessions = emptyMap<String, ReceiverSession>()
     private var receiverDelaysMs = emptyMap<String, Int>()
     private val receiverSessionLock = Any()
+    private val networkClock = NetworkClock()
+    private var groupTimeline: GroupTimeline? = null
+    private data class CalibrationRun(
+        val token: String,
+        val savedDelays: Map<String, Int>,
+        var lastContact: Long = System.nanoTime(),
+        var speaker: String? = null,
+        var probeFrame: Long = Long.MAX_VALUE,
+    )
+    private var calibration: CalibrationRun? = null
     private val receiverChangeMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
     @Volatile private var currentVolume = DEFAULT_INITIAL_VOLUME
@@ -42,6 +55,7 @@ class AudioCaptureService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            CalibrationProtocol.COMMAND -> handleCalibration(intent)
             "START" -> {
                 if (hasActiveStream()) {
                     sendReceiverStateBroadcast(
@@ -232,7 +246,30 @@ class AudioCaptureService : Service() {
             }) { pcmData ->
                 // This runs on IO thread from AudioCapture
                 synchronized(receiverSessionLock) {
-                    receiverSessions.values.forEach { it.sendFrame(pcmData) }
+                    val timeline = groupTimeline ?: GroupTimeline(
+                        networkClock.unixNanos() + GROUP_START_DELAY_MS * 1_000_000L,
+                    ).also { timeline ->
+                        groupTimeline = timeline
+                        receiverSessions.forEach { (address, session) ->
+                            session.synchronizeAtNanos(
+                                timeline.startUnixNanos + (receiverDelaysMs[address] ?: 0) * 1_000_000L,
+                            )
+                        }
+                    }
+                    calibration?.let {
+                        if (System.nanoTime() - it.lastContact > 30_000_000_000L) endCalibration()
+                    }
+                    val run = calibration
+                    if (run == null) {
+                        receiverSessions.values.forEach { it.sendFrame(pcmData) }
+                    } else {
+                        val silence = ByteArray(pcmData.size)
+                        val probe = CalibrationSignal.pcm(timeline.nextFrame - run.probeFrame, pcmData.size / 4)
+                        receiverSessions.forEach { (address, session) ->
+                            session.sendFrame(if (address == run.speaker) probe else silence)
+                        }
+                    }
+                    timeline.advance(pcmData.size / 4)
                 }
             }
             
@@ -243,7 +280,7 @@ class AudioCaptureService : Service() {
                         try {
                             session.connect(
                                 initialVolume = initialVolume,
-                                synchronizeImmediately = !synchronizedGroup,
+                                synchronizeImmediately = false,
                             )
                         } catch (error: Exception) {
                             throw Exception("${session.target.name}: ${error.message}", error)
@@ -257,12 +294,6 @@ class AudioCaptureService : Service() {
                         }
                     }
                     if (synchronizedGroup) {
-                        val sharedStartMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
-                        preparedSessions.forEach { (address, session) ->
-                            session.synchronizeAt(
-                                sharedStartMillis + (requestedDelaysMs[address] ?: 0),
-                            )
-                        }
                         val protocolLabel = when {
                             preparedSessions.values.any(ReceiverSession::usesAirPlay1) &&
                                 preparedSessions.values.any(ReceiverSession::usesAirPlay2) ->
@@ -281,18 +312,6 @@ class AudioCaptureService : Service() {
                                     "${adjusted.size} receiver(s)",
                             )
                         }
-                    } else {
-                        // A standalone RAOP receiver needs the same short future-dated
-                        // start used by grouped playback. Without it, its first RTP
-                        // packet is timestamped for "now" and can already be late by
-                        // the time it reaches the receiver's render buffer.
-                        preparedSessions.values.singleOrNull()
-                            ?.takeIf(ReceiverSession::usesAirPlay1)
-                            ?.let { session ->
-                                session.synchronizeAt(
-                                    System.currentTimeMillis() + GROUP_START_DELAY_MS,
-                                )
-                            }
                     }
                     sendReceiverStateBroadcast()
                     sendStatusBroadcast("Connected. Starting capture...")
@@ -330,6 +349,10 @@ class AudioCaptureService : Service() {
 
     private suspend fun addReceiver(address: String, enteredPassword: String?) {
         receiverChangeMutex.withLock {
+            if (synchronized(receiverSessionLock) { calibration != null }) {
+                sendReceiverStateBroadcast(error = "Finish calibration before changing speakers")
+                return
+            }
             if (!captureStarted) {
                 sendReceiverStateBroadcast(
                     error = "Wait for the current stream to finish connecting before adding a receiver",
@@ -366,17 +389,13 @@ class AudioCaptureService : Service() {
                     throw IllegalStateException("The stream was stopped while adding ${target.name}")
                 }
 
-                val sharedStartMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
                 synchronized(receiverSessionLock) {
-                    val synchronizedSessions = receiverSessions + (address to session)
-                    val synchronizedDelays = receiverDelaysMs + (address to 0)
-                    synchronizedSessions.forEach { (receiverAddress, receiverSession) ->
-                        receiverSession.synchronizeAt(
-                            sharedStartMillis + (synchronizedDelays[receiverAddress] ?: 0),
-                        )
-                    }
-                    receiverSessions = synchronizedSessions
-                    receiverDelaysMs = synchronizedDelays
+                    val timeline = requireNotNull(groupTimeline) { "Waiting for captured audio" }
+                    check(captureStarted) { "Stream stopped while connecting" }
+                    check(calibration == null) { "Finish calibration before changing speakers" }
+                    session.synchronizeAtNanos(timeline.timeAt(timeline.nextFrame))
+                    receiverSessions = receiverSessions + (address to session)
+                    receiverDelaysMs = receiverDelaysMs + (address to 0)
                 }
                 sendStatusBroadcast(
                     "[Group] ${target.name} joined at the next shared audio frame",
@@ -393,7 +412,15 @@ class AudioCaptureService : Service() {
 
     private suspend fun removeReceiver(address: String) {
         receiverChangeMutex.withLock {
+            if (synchronized(receiverSessionLock) { calibration != null }) {
+                sendReceiverStateBroadcast(error = "Finish calibration before changing speakers")
+                return
+            }
             val removed = synchronized(receiverSessionLock) {
+                if (calibration != null) {
+                    sendReceiverStateBroadcast(error = "Finish calibration before changing speakers")
+                    return
+                }
                 if (receiverSessions.size <= 1) {
                     null
                 } else {
@@ -490,12 +517,12 @@ class AudioCaptureService : Service() {
                             }
                         }
                     },
-                ),
+                ).also { it.networkClock = networkClock },
             )
         } else {
             ReceiverSession(
                 target = target,
-                airPlay1 = RaopSession(target.host, target.port, sessionLog),
+                airPlay1 = RaopSession(target.host, target.port, sessionLog).also { it.networkClock = networkClock },
             )
         }
     }
@@ -510,48 +537,92 @@ class AudioCaptureService : Service() {
         captureStarted || audioCapture != null || receiverSessionAddresses().isNotEmpty()
 
     private fun setReceiverDelay(address: String, delayMs: Int) {
-        val session = synchronized(receiverSessionLock) {
-            receiverSessions[address]?.also {
+        val applied = synchronized(receiverSessionLock) {
+            val session = receiverSessions[address]
+            if (calibration != null || session == null || !captureStarted || groupTimeline == null) false else {
+                session.shiftDelay(delayMs - (receiverDelaysMs[address] ?: 0))
                 receiverDelaysMs = receiverDelaysMs + (address to delayMs)
+                true
             }
         }
-        if (session == null || !captureStarted) {
-            sendReceiverStateBroadcast(error = "Receiver is not currently streaming")
-            return
-        }
-
-        // Keep the next frame safely in the future while changing its mapping.
-        // Only this receiver moves; the chosen reference and other sessions keep
-        // their established timelines.
-        session.synchronizeAt(
-            System.currentTimeMillis() + GROUP_START_DELAY_MS + delayMs,
-        )
-        sendStatusBroadcast("[Group] ${session.target.name} delay set to $delayMs ms")
-        sendReceiverStateBroadcast()
+        sendReceiverStateBroadcast(if (applied) null else "Receiver is not currently streaming")
     }
 
     private fun setGroupDelays(delaysMs: Map<String, Int>) {
-        val sessions = synchronized(receiverSessionLock) {
-            if (!captureStarted || receiverSessions.keys != delaysMs.keys) {
-                emptyMap()
-            } else {
-                receiverDelaysMs = receiverSessions.keys.associateWith { address ->
-                    delaysMs[address] ?: 0
+        val applied = synchronized(receiverSessionLock) {
+            if (calibration != null || !captureStarted || groupTimeline == null || receiverSessions.keys != delaysMs.keys) false else {
+                receiverSessions.forEach { (address, session) ->
+                    session.shiftDelay(delaysMs.getValue(address) - (receiverDelaysMs[address] ?: 0))
                 }
-                receiverSessions.toMap()
+                receiverDelaysMs = delaysMs.toMap()
+                true
             }
         }
-        if (sessions.isEmpty()) {
-            sendReceiverStateBroadcast(error = "The selected receiver group is not streaming")
-            return
-        }
+        sendReceiverStateBroadcast(if (applied) null else "The selected receiver group is not streaming")
+    }
 
-        val sharedTargetMillis = System.currentTimeMillis() + GROUP_START_DELAY_MS
-        sessions.forEach { (address, session) ->
-            session.synchronizeAt(sharedTargetMillis + (delaysMs[address] ?: 0))
+    // Called under receiverSessionLock, so commands and PCM boundaries are atomic.
+    private fun endCalibration(keepDelays: Boolean = false) {
+        val run = calibration ?: return
+        if (!keepDelays) {
+            receiverSessions.forEach { (address, session) ->
+                session.shiftDelay((run.savedDelays[address] ?: 0) - (receiverDelaysMs[address] ?: 0))
+            }
+            receiverDelaysMs = run.savedDelays
         }
-        sendStatusBroadcast("[Group] Reference receiver changed; speaker timing reset")
-        sendReceiverStateBroadcast()
+        calibration = null
+    }
+
+    private fun handleCalibration(intent: Intent) {
+        val token = intent.getStringExtra("TOKEN").orEmpty()
+        val request = intent.getStringExtra("REQUEST").orEmpty()
+        val response = Intent(CalibrationProtocol.RESULT).setPackage(packageName)
+            .putExtra("TOKEN", token).putExtra("REQUEST", request)
+        try {
+            synchronized(receiverSessionLock) {
+                val operation = intent.getStringExtra("OP")
+                if (operation == "begin") {
+                    check(captureStarted && groupTimeline != null) { "Start streaming before calibration" }
+                    check(calibration == null) { "Calibration is already running" }
+                    check(intent.getStringArrayListExtra("ADDRESSES")?.toSet() == receiverSessions.keys) { "Speaker group changed" }
+                    calibration = CalibrationRun(token, receiverDelaysMs.toMap())
+                } else {
+                    val run = requireNotNull(calibration) { "Calibration ended; please start again" }
+                    check(run.token == token) { "Calibration session changed" }
+                    run.lastContact = System.nanoTime()
+                    when (operation) {
+                        "probe" -> {
+                            val timeline = requireNotNull(groupTimeline)
+                            val address = intent.getStringExtra("ADDRESS").orEmpty()
+                            check(address in receiverSessions) { "Speaker disconnected" }
+                            run.speaker = address
+                            run.probeFrame = timeline.nextFrame + CalibrationSignal.RATE
+                            response.putExtra("EXPECTED", LongArray(3) { index ->
+                                networkClock.monotonicAt(timeline.timeAt(run.probeFrame + index * CalibrationSignal.SPACING)) +
+                                    2_000_000_000L + (receiverDelaysMs[address] ?: 0) * 1_000_000L
+                            })
+                        }
+                        "apply" -> {
+                            val addresses = intent.getStringArrayListExtra("ADDRESSES").orEmpty()
+                            val delays = intent.getIntegerArrayListExtra("DELAYS").orEmpty()
+                            check(addresses.toSet() == receiverSessions.keys && addresses.size == delays.size) { "Speaker group changed" }
+                            check(delays.all { it in 0..MAX_RECEIVER_DELAY_MS }) { "Required correction exceeds the supported range" }
+                            addresses.zip(delays).forEach { (address, delay) ->
+                                receiverSessions.getValue(address).shiftDelay(delay - (receiverDelaysMs[address] ?: 0))
+                            }
+                            receiverDelaysMs = addresses.zip(delays).toMap()
+                        }
+                        "commit" -> endCalibration(keepDelays = true)
+                        "end" -> endCalibration()
+                        "heartbeat" -> Unit
+                        else -> error("Unknown calibration operation")
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            response.putExtra("ERROR", error.message ?: "Calibration failed")
+        }
+        sendBroadcast(response)
     }
 
     private fun startNowPlayingMonitor() {
@@ -597,6 +668,8 @@ class AudioCaptureService : Service() {
         val sessions = synchronized(receiverSessionLock) {
             receiverSessions.values.toList().also {
                 receiverSessions = emptyMap()
+                groupTimeline = null
+                calibration = null
                 receiverDelaysMs = emptyMap()
             }
         }
@@ -648,9 +721,15 @@ class AudioCaptureService : Service() {
             airPlay2?.sendFrame(pcm)
         }
 
-        fun synchronizeAt(unixTimeMillis: Long) {
-            airPlay1?.synchronizeAt(unixTimeMillis)
-            airPlay2?.synchronizeAt(unixTimeMillis)
+        fun synchronizeAtNanos(unixTimeNanos: Long) {
+            airPlay1?.synchronizeAtNanos(unixTimeNanos)
+            airPlay2?.synchronizeAtNanos(unixTimeNanos)
+        }
+
+        fun shiftDelay(deltaMillis: Int) {
+            if (deltaMillis == 0) return
+            airPlay1?.shiftDelay(deltaMillis)
+            airPlay2?.shiftDelay(deltaMillis)
         }
 
         fun setVolume(volume: Float) {

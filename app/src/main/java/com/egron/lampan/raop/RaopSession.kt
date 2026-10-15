@@ -6,7 +6,6 @@ import java.net.DatagramPacket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
-import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.security.Security
 import java.util.Random
@@ -51,13 +50,13 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     private var packetCount = 0L
     private var firstSyncSent = false
     private val syncTimeline = RtpNtpTimeline()
+    internal var networkClock = NetworkClock()
     @Volatile private var timingRequestsReceived = 0
     private val encoder = AlacEncoder()
     private val random = Random() 
 
     // Force L16 PCM mode via "Uncompressed ALAC"
     private val useL16 = true
-    private val latencySamples = 11025
 
     private fun log(msg: String) {
         Log.i(TAG, msg)
@@ -162,7 +161,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
              "m=audio 0 RTP/AVP 96\r\n" +
              "$rtpMapLine\r\n" +
              "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n" +
-             "a=min-latency:$latencySamples"
+             "a=min-latency:${AirPlaySyncPacket.MIN_LATENCY_FRAMES}"
 
         val announceHeaders = mapOf(
             "Content-Type" to "application/sdp",
@@ -299,7 +298,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
                         response[1] = 0xD3.toByte()
                         response[2] = 0x00; response[3] = 0x00
                         System.arraycopy(buffer, 24, response, 8, 8)
-                        val nowNtp = ntpTime()
+                        val nowNtp = ntpFromUnixNanos(networkClock.unixNanos())
                         putLong(response, 16, nowNtp)
                         putLong(response, 24, nowNtp)
                         val reply = DatagramPacket(response, 32, packet.address, packet.port)
@@ -315,12 +314,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         }
     }
     
-    private fun ntpTime(millis: Long = System.currentTimeMillis()): Long {
-        val offset = 2208988800L
-        val seconds = (millis / 1000) + offset
-        val fraction = ((millis % 1000) * 4294967296L / 1000)
-        return (seconds shl 32) or fraction
-    }
+
     
     private fun putLong(buffer: ByteArray, offset: Int, value: Long) {
         var v = value
@@ -333,8 +327,8 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     // Send UDP Sync Packet (Type 84) to Control Port
     private fun sendSyncPacket(
         first: Boolean,
-        ntpTimestamp: Long = ntpTime(
-            syncTimeline.unixTimeAt(rtpTimestamp, System.currentTimeMillis()),
+        ntpTimestamp: Long = ntpFromUnixNanos(
+            syncTimeline.unixNanosAt(rtpTimestamp, networkClock.unixNanos()),
         ),
     ) {
         if (serverControlPort == -1 || clientControlSocket == null || serverAddress == null) {
@@ -343,32 +337,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         }
         
         try {
-            // Sync Packet (PT=84) - 20 bytes
-            // Header (8 bytes):
-            // Byte 0: If first, X=1 (0x90). Else X=0 (0x80). V=2, P=0, CC=0.
-            val b0 = if (first) 0x90 else 0x80
-            
-            val buffer = ByteBuffer.allocate(20) 
-            
-            buffer.put(b0.toByte()) 
-            buffer.put(0xD4.toByte()) // M=1, PT=84
-            
-            // Fixed sync sequence field in network byte order.
-            buffer.putShort(7)
-            
-            // Header Timestamp: current RTP timestamp minus latency
-            buffer.putInt((rtpTimestamp - latencySamples).toInt())
-            
-            // Payload (12 bytes): 
-            // NTP (8 bytes) + RTP (4 bytes)
-            
-            // NTP Timestamp (Current wall clock)
-            buffer.putLong(ntpTimestamp)
-            
-            // RTP Timestamp (Current stream time)
-            buffer.putInt(rtpTimestamp.toInt())
-            
-            val packetBytes = buffer.array()
+            val packetBytes = AirPlaySyncPacket.encode(first, rtpTimestamp, ntpTimestamp)
             val packet = DatagramPacket(packetBytes, packetBytes.size, serverAddress!!, serverControlPort)
             clientControlSocket?.send(packet)
             // log("Sent Sync Packet (first=$first) to $serverControlPort")
@@ -378,13 +347,14 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         }
     }
 
+    @Synchronized
     fun sendFrame(pcm: ByteArray) {
         if (serverAudioPort == -1 || clientAudioSocket == null) return
 
         try {
             // Send Sync packet on first frame (if not sent yet) and periodically
             if (!firstSyncSent) {
-                syncTimeline.synchronizeAt(rtpTimestamp, System.currentTimeMillis())
+                syncTimeline.synchronizeAtNanos(rtpTimestamp, networkClock.unixNanos())
                 sendSyncPacket(true)
                 firstSyncSent = true
             } else if (packetCount > 0 && packetCount % 125L == 0L) {
@@ -427,14 +397,23 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     }
 
     /** Map the next audio sample to the same network time as other sessions. */
-    fun synchronizeAt(unixTimeMillis: Long) {
+    fun synchronizeAt(unixTimeMillis: Long) = synchronizeAtNanos(unixTimeMillis * 1_000_000L)
+
+    @Synchronized
+    internal fun synchronizeAtNanos(unixTimeNanos: Long) {
         check(serverControlPort in 1..0xFFFF && clientControlSocket != null) {
             "AirPlay 1 session must be connected before synchronization"
         }
-        syncTimeline.synchronizeAt(rtpTimestamp, unixTimeMillis)
-        sendSyncPacket(first = !firstSyncSent, ntpTimestamp = ntpTime(unixTimeMillis))
+        syncTimeline.synchronizeAtNanos(rtpTimestamp, unixTimeNanos)
+        sendSyncPacket(first = !firstSyncSent, ntpTimestamp = ntpFromUnixNanos(unixTimeNanos))
         firstSyncSent = true
-        log("RaopSession: Shared start scheduled for $unixTimeMillis at RTP $rtpTimestamp")
+        log("RaopSession: Shared start scheduled for ${unixTimeNanos / 1_000_000L} at RTP $rtpTimestamp")
+    }
+
+    @Synchronized
+    internal fun shiftDelay(deltaMillis: Int) {
+        syncTimeline.shiftByMillis(deltaMillis)
+        sendSyncPacket(first = false)
     }
 
     fun setVolume(vol: Float) {

@@ -24,7 +24,8 @@ private val LampanLightColors = lightColorScheme(
     onSurface = Color(0xFF1D1B17),
     surfaceVariant = Color(0xFFEDE7DF),
     onSurfaceVariant = Color(0xFF4D443C),
-    outline = Color(0xFFB7AFA7)
+    outlineVariant = Color(0xFFD8D1C8),
+    outline = Color(0xFF8A8178)
 )
 
 private val LampanDarkColors = darkColorScheme(
@@ -40,26 +41,27 @@ private val LampanDarkColors = darkColorScheme(
     onSurface = Color(0xFFE4E1DC),
     surfaceVariant = Color(0xFF2A3532),
     onSurfaceVariant = Color(0xFFB3C0BA),
-    outline = Color(0xFF51605B)
+    outlineVariant = Color(0xFF3D4B46),
+    outline = Color(0xFF75867E)
 )
 
 private val LampanTypography = Typography(
     headlineLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 30.sp,
+        fontSize = 28.sp,
         letterSpacing = 0.2.sp
     ),
     headlineMedium = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 24.sp,
         letterSpacing = 0.2.sp
     ),
     titleMedium = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.Medium,
-        fontSize = 18.sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 20.sp,
         letterSpacing = 0.1.sp
     ),
     bodyMedium = TextStyle(

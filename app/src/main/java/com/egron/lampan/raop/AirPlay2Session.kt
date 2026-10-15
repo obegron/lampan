@@ -45,6 +45,7 @@ class AirPlay2Session(
     private var lastProgressKey: String? = null
     private var firstSyncSent = false
     private val syncTimeline = RtpNtpTimeline()
+    internal var networkClock = NetworkClock()
     private var pendingPcm = ByteArray(0)
     private var connection: AirPlay2Connection? = null
     private var audioCipher: AirPlay2AudioPacketCipher? = null
@@ -312,14 +313,23 @@ class AirPlay2Session(
     }
 
     /** Give several prepared sessions the exact same RTP-to-NTP start mapping. */
-    fun synchronizeAt(unixTimeMillis: Long) {
+    fun synchronizeAt(unixTimeMillis: Long) = synchronizeAtNanos(unixTimeMillis * 1_000_000L)
+
+    @Synchronized
+    internal fun synchronizeAtNanos(unixTimeNanos: Long) {
         check(running && serverControlPort in 1..0xFFFF) {
             "AirPlay 2 session must be connected before synchronization"
         }
-        syncTimeline.synchronizeAt(rtpTimestamp, unixTimeMillis)
-        sendSyncPacket(first = !firstSyncSent, ntpTimestamp = ntpTime(unixTimeMillis))
+        syncTimeline.synchronizeAtNanos(rtpTimestamp, unixTimeNanos)
+        sendSyncPacket(first = !firstSyncSent, ntpTimestamp = ntpFromUnixNanos(unixTimeNanos))
         firstSyncSent = true
         connection?.let(::sendInitialMetadata)
+    }
+
+    @Synchronized
+    internal fun shiftDelay(deltaMillis: Int) {
+        syncTimeline.shiftByMillis(deltaMillis)
+        sendSyncPacket(first = false)
     }
 
     /** Sonos-class receivers may acknowledge audio SETUP but wait for a track announcement. */
@@ -528,7 +538,7 @@ class AirPlay2Session(
                     val request = DatagramPacket(buffer, buffer.size)
                     socket.receive(request)
                     if (request.length < 32 || (buffer[1].toInt() and 0x7F) != 0x52) continue
-                    val now = ntpTime()
+                    val now = ntpFromUnixNanos(networkClock.unixNanos())
                     val response = ByteBuffer.allocate(32).apply {
                         put(buffer[0])
                         put(0xD3.toByte())
@@ -552,21 +562,13 @@ class AirPlay2Session(
 
     private fun sendSyncPacket(
         first: Boolean,
-        ntpTimestamp: Long = ntpTime(
-            syncTimeline.unixTimeAt(rtpTimestamp, System.currentTimeMillis()),
+        ntpTimestamp: Long = ntpFromUnixNanos(
+            syncTimeline.unixNanosAt(rtpTimestamp, networkClock.unixNanos()),
         ),
     ) {
         if (serverControlPort !in 1..0xFFFF) return
         try {
-            val current = rtpTimestamp.toInt()
-            val response = ByteBuffer.allocate(20).apply {
-                put(if (first) 0x90.toByte() else 0x80.toByte())
-                put(0xD4.toByte())
-                putShort(7)
-                putInt(current - RENDER_LATENCY_FRAMES)
-                putLong(ntpTimestamp)
-                putInt(current)
-            }.array()
+            val response = AirPlaySyncPacket.encode(first, rtpTimestamp, ntpTimestamp)
             requireNotNull(controlSocket).send(
                 DatagramPacket(response, response.size, serverAddress, serverControlPort),
             )
@@ -669,11 +671,7 @@ class AirPlay2Session(
             ?.substringAfter(':')
             ?.trim()
 
-    private fun ntpTime(millis: Long = System.currentTimeMillis()): Long {
-        val seconds = millis / 1_000 + NTP_UNIX_EPOCH_OFFSET
-        val fraction = (millis % 1_000) * 0x1_0000_0000L / 1_000
-        return (seconds shl 32) or fraction
-    }
+
 
     private companion object {
         const val BINARY_PLIST = "application/x-apple-binary-plist"
@@ -682,8 +680,8 @@ class AirPlay2Session(
         const val PCM_BYTES_PER_PACKET = FRAMES_PER_PACKET * 2 * 2
         const val RTP_PAYLOAD_TYPE = 96
         const val AUDIO_FORMAT_ALAC_44K_16_STEREO = 0x40000
-        const val MIN_LATENCY_FRAMES = 11_025
-        const val RENDER_LATENCY_FRAMES = 88_200
+        const val MIN_LATENCY_FRAMES = AirPlaySyncPacket.MIN_LATENCY_FRAMES
+        const val RENDER_LATENCY_FRAMES = AirPlaySyncPacket.RENDER_LATENCY_FRAMES
         const val SYNC_INTERVAL_PACKETS = 125L
         const val RETRANSMIT_SLOTS = 512
         const val DATAGRAM_TIMEOUT_MS = 1_000
