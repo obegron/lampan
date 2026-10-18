@@ -9,7 +9,7 @@ and your local network.
 
 [![Latest release](https://img.shields.io/github/v/release/obegron/lampan?style=flat-square&label=latest)](https://github.com/obegron/lampan/releases/latest)
 ![Android 10+](https://img.shields.io/badge/Android-10%2B-3DDC84?style=flat-square&logo=android&logoColor=white)
-[![MIT license](https://img.shields.io/github/license/obegron/lampan?style=flat-square)](LICENSE)
+[![MIT license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 <img src="docs/images/lampan-main.png" alt="Lampan receiver and streaming screen" width="360">
 
