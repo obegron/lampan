@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.1
+
+- Enable R8 optimization and resource shrinking for release APKs.
+- Preserve Bouncy Castle provider classes used by AirPlay encryption.
+
 ## v0.6.0
 
 - Anchor group playback and NTP responses to a shared monotonic clock with

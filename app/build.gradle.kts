@@ -36,8 +36,8 @@ android {
         applicationId = "com.egron.lampan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 27
-        versionName = "0.6.0"
+        versionCode = 28
+        versionName = "0.6.1"
         buildConfigField(
             "String",
             "SOURCE_REVISION_TIME_UTC",
@@ -75,7 +75,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("lampanRelease")
         }
@@ -105,6 +106,12 @@ android {
             isReturnDefaultValues = true
         }
     }
+}
+
+// AGP requests the unpublished compose-group-mapping:2.2.10 artifact.
+// Disable optional Compose stack-trace mapping while retaining R8 optimization.
+composeCompiler {
+    includeComposeMappingFile.set(false)
 }
 
 dependencies {

@@ -1,0 +1,1 @@
+Enable R8 optimization and resource shrinking for release APKs. Preserve Bouncy Castle provider classes used by AirPlay encryption.
