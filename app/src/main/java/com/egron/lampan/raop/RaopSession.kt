@@ -416,7 +416,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         sendSyncPacket(first = false)
     }
 
-    fun setVolume(vol: Float) {
+    fun setVolume(vol: Float, strict: Boolean = false) {
         val clampedVol = vol.coerceIn(0.0f, 1.0f)
         val db = if (clampedVol == 0.0f) -144.0f else (clampedVol * 30.0f) - 30.0f
         
@@ -431,8 +431,10 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             if (serverSession != null) {
                 headers["Session"] = serverSession!!
             }
-            client.sendRequest("SET_PARAMETER", "rtsp://$host:$port/${sessionId!!}", headers, body = content)
+            val response = client.sendRequest("SET_PARAMETER", "rtsp://$host:$port/${sessionId!!}", headers, body = content)
+            if (strict) check(response.code in 200..299) { "Receiver rejected volume (RTSP ${response.code})" }
         } catch (e: Exception) {
+            if (strict) throw e
             e.printStackTrace()
         }
     }

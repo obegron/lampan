@@ -19,6 +19,7 @@ import kotlin.math.abs
 class AudioCapture(
     private val mediaProjection: MediaProjection,
     private val onStatus: (String) -> Unit,
+    private val onCaptureStopped: () -> Unit = {},
     private val onAudioData: (ByteArray) -> Unit
 ) {
     private var audioRecord: AudioRecord? = null
@@ -47,6 +48,7 @@ class AudioCapture(
                 override fun onStop() {
                     onStatus("AudioCapture: MediaProjection stopped")
                     stopAudioRecord()
+                    onCaptureStopped()
                 }
             }
             mediaProjection.registerCallback(callback, callbackHandler)
@@ -132,8 +134,16 @@ class AudioCapture(
                     } else {
                          if (read < 0) {
                              onStatus("AudioCapture Error: read returned $read")
+                             break
                          }
                     }
+                }
+            }.also { job ->
+                job.invokeOnCompletion { error ->
+                    if (error != null && error !is kotlinx.coroutines.CancellationException) {
+                        onStatus("AudioCapture failed: ${error.message}")
+                    }
+                    onCaptureStopped()
                 }
             }
         } catch (e: Exception) {

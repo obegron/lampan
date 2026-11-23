@@ -34,6 +34,19 @@ class PreferencesManager(context: Context) {
     fun getVolume(): Float =
         prefs.getFloat(LAST_VOLUME, DEFAULT_VOLUME).coerceIn(0f, 1f)
 
+    private fun receiverVolumePreference(address: String): String {
+        val identity = getAirPlayCapabilities(address)?.let(::receiverVolumeKey)
+            ?: address.substringBefore(':')
+        return "RECEIVER_VOLUME_${preferenceDigest(identity)}"
+    }
+
+    fun getReceiverVolume(address: String, fallback: Float): Float =
+        prefs.getFloat(receiverVolumePreference(address), fallback).coerceIn(0f, 1f)
+
+    fun saveReceiverVolume(address: String, volume: Float) {
+        prefs.edit().putFloat(receiverVolumePreference(address), volume.coerceIn(0f, 1f)).apply()
+    }
+
     fun saveDebugInformationEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(SHOW_DEBUG_INFORMATION, enabled).apply()
     }
@@ -53,6 +66,12 @@ class PreferencesManager(context: Context) {
     }
 
     fun isDarkThemeEnabled(): Boolean = prefs.getBoolean(DARK_THEME_ENABLED, true)
+
+    fun isPhoneMediaMuteEnabled(): Boolean = prefs.getBoolean("MUTE_PHONE_MEDIA", false)
+
+    fun savePhoneMediaMuteEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("MUTE_PHONE_MEDIA", enabled).apply()
+    }
 
     internal fun getGroupSyncProfile(receiverKeys: Collection<String>): GroupSyncProfile {
         val keys = receiverKeys.distinct().sorted()

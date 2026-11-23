@@ -18,6 +18,7 @@ out/
 
 # Gradle files
 .gradle/
+.kotlin/
 build/
 
 # Local configuration file (sdk.dir is not checked in)

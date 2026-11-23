@@ -298,7 +298,7 @@ class AirPlay2Session(
         }
     }
 
-    fun setVolume(volume: Float) {
+    fun setVolume(volume: Float, strict: Boolean = false) {
         val connected = connection ?: return
         val clamped = volume.coerceIn(0f, 1f)
         val decibels = if (clamped == 0f) -144f else clamped * 30f - 30f
@@ -309,6 +309,7 @@ class AirPlay2Session(
             body = "volume: %.6f\r\n".format(Locale.US, decibels),
             logExchange = false,
         )
+        if (strict) check(response.code in 200..299) { "Receiver rejected volume (RTSP ${response.code})" }
         log("[AP2] Volume %.2f dB (RTSP ${response.code})".format(Locale.US, decibels))
     }
 

@@ -7,8 +7,11 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjectionManager
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import com.egron.lampan.R
 import com.egron.lampan.calibration.CalibrationProtocol
@@ -20,9 +23,11 @@ import com.egron.lampan.raop.NetworkClock
 import com.egron.lampan.raop.RaopSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.math.roundToInt
 
 class AudioCaptureService : Service() {
 
@@ -44,7 +49,13 @@ class AudioCaptureService : Service() {
     private val receiverChangeMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
     @Volatile private var currentVolume = DEFAULT_INITIAL_VOLUME
+    private var speakerVolumes = SpeakerVolumes()
+    private var volumeCommandJob: Job? = null
     @Volatile private var captureStarted = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val phoneMediaMute by lazy {
+        PhoneMediaMute(AndroidMediaMuteOutput(getSystemService(AudioManager::class.java)))
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -119,11 +130,21 @@ class AudioCaptureService : Service() {
                     stopSelf(startId)
                 }
             }
+            ACTION_REFRESH_PHONE_MUTE -> {
+                updatePhoneMediaMute()
+                sendReceiverStateBroadcast()
+                if (!hasActiveStream()) stopSelf(startId)
+            }
             "SET_VOLUME" -> {
                 val vol = intent.getFloatExtra("VOLUME", currentVolume)
-                currentVolume = vol
-                scope.launch {
-                    receiverSessionSnapshot().forEach { it.setVolume(vol) }
+                val receiver = intent.getStringExtra(EXTRA_VOLUME_RECEIVER)
+                val requestId = intent.getLongExtra(EXTRA_VOLUME_REQUEST_ID, 0)
+                val previous = volumeCommandJob
+                volumeCommandJob = scope.launch {
+                    previous?.join()
+                    receiverChangeMutex.withLock {
+                        if (vol.isFinite()) setVolumes(receiver, (vol * 100).roundToInt(), requestId)
+                    }
                 }
             }
             "ADD_RECEIVER" -> {
@@ -236,13 +257,23 @@ class AudioCaptureService : Service() {
             }
             synchronized(receiverSessionLock) {
                 receiverSessions = preparedSessions
+                speakerVolumes = SpeakerVolumes.from(requestedReceivers.associateWith { address ->
+                    (preferences.getReceiverVolume(address, minOf(initialVolume, DEFAULT_INITIAL_VOLUME)) * 100).roundToInt()
+                })
+                currentVolume = speakerVolumes.group / 100f
                 receiverDelaysMs = requestedReceivers.associateWith { address ->
                     requestedDelaysMs[address]?.coerceIn(0, MAX_RECEIVER_DELAY_MS) ?: 0
                 }
             }
             
-            audioCapture = AudioCapture(mediaProjection, { status -> 
-                sendStatusBroadcast(status)
+            lateinit var capture: AudioCapture
+            capture = AudioCapture(mediaProjection, ::sendStatusBroadcast, onCaptureStopped = {
+                mainHandler.post {
+                    if (audioCapture === capture) {
+                        stopCapture()
+                        stopSelf()
+                    }
+                }
             }) { pcmData ->
                 // This runs on IO thread from AudioCapture
                 synchronized(receiverSessionLock) {
@@ -272,6 +303,7 @@ class AudioCaptureService : Service() {
                     timeline.advance(pcmData.size / 4)
                 }
             }
+            audioCapture = capture
             
             scope.launch {
                 try {
@@ -279,7 +311,7 @@ class AudioCaptureService : Service() {
                     preparedSessions.values.filter(ReceiverSession::usesAirPlay2).forEach { session ->
                         try {
                             session.connect(
-                                initialVolume = initialVolume,
+                                initialVolume = volumeFor(session.target.address),
                                 synchronizeImmediately = false,
                             )
                         } catch (error: Exception) {
@@ -288,7 +320,7 @@ class AudioCaptureService : Service() {
                     }
                     preparedSessions.values.filterNot(ReceiverSession::usesAirPlay2).forEach { session ->
                         try {
-                            session.connect(initialVolume = initialVolume)
+                            session.connect(initialVolume = volumeFor(session.target.address))
                         } catch (error: Exception) {
                             throw Exception("${session.target.name}: ${error.message}", error)
                         }
@@ -313,10 +345,16 @@ class AudioCaptureService : Service() {
                             )
                         }
                     }
-                    sendReceiverStateBroadcast()
                     sendStatusBroadcast("Connected. Starting capture...")
-                    audioCapture?.start()
-                    captureStarted = true
+                    synchronized(receiverSessionLock) {
+                        check(receiverSessions === preparedSessions && audioCapture === capture) {
+                            "Streaming stopped while connecting"
+                        }
+                        capture.start()
+                        captureStarted = true
+                        updatePhoneMediaMute()
+                    }
+                    sendReceiverStateBroadcast()
                     startNowPlayingMonitor()
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -380,9 +418,16 @@ class AudioCaptureService : Service() {
                     prefixLogs = true,
                 )
                 prepared = session
+                val receiverVolume = preferences.getReceiverVolume(
+                    address, minOf(currentVolume, DEFAULT_INITIAL_VOLUME),
+                )
+                val initialReceiverVolume = synchronized(receiverSessionLock) {
+                    speakerVolumes.add(address, (receiverVolume * 100).roundToInt())
+                        .levels.getValue(address) / 100f
+                }
                 sendStatusBroadcast("[Group] Connecting ${target.name} while capture continues...")
                 session.connect(
-                    initialVolume = currentVolume,
+                    initialVolume = initialReceiverVolume,
                     synchronizeImmediately = false,
                 )
                 if (!captureStarted) {
@@ -395,6 +440,8 @@ class AudioCaptureService : Service() {
                     check(calibration == null) { "Finish calibration before changing speakers" }
                     session.synchronizeAtNanos(timeline.timeAt(timeline.nextFrame))
                     receiverSessions = receiverSessions + (address to session)
+                    speakerVolumes = speakerVolumes.add(address, (receiverVolume * 100).roundToInt())
+                    currentVolume = speakerVolumes.group / 100f
                     receiverDelaysMs = receiverDelaysMs + (address to 0)
                 }
                 sendStatusBroadcast(
@@ -426,6 +473,8 @@ class AudioCaptureService : Service() {
                 } else {
                     receiverSessions[address]?.also {
                         receiverSessions = receiverSessions - address
+                        speakerVolumes = speakerVolumes.remove(address)
+                        currentVolume = speakerVolumes.group / 100f
                         receiverDelaysMs = receiverDelaysMs - address
                     }
                 }
@@ -640,14 +689,20 @@ class AudioCaptureService : Service() {
         ).also(NowPlayingMonitor::start)
     }
 
-    private fun sendReceiverStateBroadcast(error: String? = null) {
+    private fun sendReceiverStateBroadcast(error: String? = null, volumeRequestId: Long = 0) {
+        val volumes = synchronized(receiverSessionLock) { speakerVolumes }
         val intent = Intent(ACTION_RECEIVER_STATE).apply {
             putStringArrayListExtra(
                 EXTRA_ACTIVE_RECEIVERS,
                 ArrayList(receiverSessionAddresses()),
             )
             putExtra(EXTRA_IS_STREAMING, hasActiveStream())
-            putExtra(EXTRA_CURRENT_VOLUME, currentVolume)
+            putExtra(EXTRA_CURRENT_VOLUME, volumes.group / 100f)
+            putExtra(EXTRA_PHONE_MEDIA_MUTED, captureStarted &&
+                getSystemService(AudioManager::class.java).isStreamMute(AudioManager.STREAM_MUSIC))
+            putExtra(EXTRA_VOLUME_REQUEST_ID, volumeRequestId)
+            putStringArrayListExtra(EXTRA_VOLUME_RECEIVERS, ArrayList(volumes.levels.keys))
+            putIntegerArrayListExtra(EXTRA_RECEIVER_VOLUMES, ArrayList(volumes.levels.values))
             val delays = synchronized(receiverSessionLock) { receiverDelaysMs.toMap() }
             putStringArrayListExtra(EXTRA_DELAY_RECEIVERS, ArrayList(delays.keys))
             putIntegerArrayListExtra(
@@ -664,20 +719,34 @@ class AudioCaptureService : Service() {
         nowPlayingMonitor?.close()
         nowPlayingMonitor = null
         val capture = audioCapture
-        captureStarted = false
         val sessions = synchronized(receiverSessionLock) {
+            captureStarted = false
             receiverSessions.values.toList().also {
                 receiverSessions = emptyMap()
                 groupTimeline = null
                 calibration = null
                 receiverDelaysMs = emptyMap()
+                speakerVolumes = SpeakerVolumes()
             }
         }
         audioCapture = null
+        updatePhoneMediaMute()
         capture?.stop()
         sendReceiverStateBroadcast()
         scope.launch {
             sessions.forEach { it.stop() }
+        }
+    }
+
+    private fun updatePhoneMediaMute() = synchronized(receiverSessionLock) {
+        try {
+            if (captureStarted && PreferencesManager(this).isPhoneMediaMuteEnabled()) {
+                phoneMediaMute.apply()
+            } else {
+                phoneMediaMute.restore()
+            }
+        } catch (error: Exception) {
+            sendReceiverStateBroadcast(error = "Could not change phone media mute: ${error.message}")
         }
     }
 
@@ -688,6 +757,51 @@ class AudioCaptureService : Service() {
         } else {
             address.trim() to 7000
         }
+    }
+
+    private fun volumeFor(address: String): Float = synchronized(receiverSessionLock) {
+        (speakerVolumes.levels[address] ?: 50) / 100f
+    }
+
+    private fun setVolumes(address: String?, percent: Int, requestId: Long) {
+        val (before, desired, sessions) = synchronized(receiverSessionLock) {
+            if (!captureStarted) return
+            val before = speakerVolumes
+            val desired = if (address == null) before.adjustGroup(percent)
+                else before.adjustSpeaker(address, percent)
+            Triple(before, desired, receiverSessions.toMap())
+        }
+        val failed = mutableListOf<String>()
+        val levels = before.levels.toMutableMap()
+        sessions.forEach { (receiver, session) ->
+            val next = desired.levels.getValue(receiver)
+            if (next != before.levels[receiver]) {
+                try {
+                    session.setVolume(next / 100f)
+                    levels[receiver] = next
+                } catch (error: Exception) {
+                    failed += session.target.name
+                    sendStatusBroadcast("Volume update failed for ${session.target.name}: ${error.message}")
+                }
+            }
+        }
+        synchronized(receiverSessionLock) {
+            // Stop can run while network requests are in progress.
+            if (!captureStarted || receiverSessions != sessions) return
+            speakerVolumes = if (failed.isEmpty()) desired else SpeakerVolumes.from(levels)
+            currentVolume = speakerVolumes.group / 100f
+            val preferences = PreferencesManager(this)
+            preferences.saveVolume(currentVolume)
+            speakerVolumes.levels.forEach { (receiver, level) ->
+                preferences.saveReceiverVolume(receiver, level / 100f)
+            }
+        }
+        sendReceiverStateBroadcast(
+            error = failed.takeIf { it.isNotEmpty() }?.joinToString(
+                prefix = "Could not change volume on ",
+            ),
+            volumeRequestId = requestId,
+        )
     }
 
     private data class ReceiverTarget(
@@ -733,8 +847,8 @@ class AudioCaptureService : Service() {
         }
 
         fun setVolume(volume: Float) {
-            airPlay1?.setVolume(volume)
-            airPlay2?.setVolume(volume)
+            airPlay1?.setVolume(volume, strict = true)
+            airPlay2?.setVolume(volume, strict = true)
         }
 
         fun updateNowPlaying(info: NowPlayingInfo?) {
@@ -751,12 +865,18 @@ class AudioCaptureService : Service() {
         const val ACTION_RECEIVER_STATE = "com.egron.lampan.RECEIVER_STATE"
         const val ACTION_QUERY_STATE = "com.egron.lampan.QUERY_STREAM_STATE"
         const val ACTION_REFRESH_NOW_PLAYING = "com.egron.lampan.REFRESH_NOW_PLAYING"
+        const val ACTION_REFRESH_PHONE_MUTE = "com.egron.lampan.REFRESH_PHONE_MUTE"
         const val ACTION_SET_RECEIVER_DELAY = "com.egron.lampan.SET_RECEIVER_DELAY"
         const val ACTION_SET_GROUP_DELAYS = "com.egron.lampan.SET_GROUP_DELAYS"
         const val EXTRA_ACTIVE_RECEIVERS = "ACTIVE_RECEIVERS"
         const val EXTRA_RECEIVER_ERROR = "RECEIVER_ERROR"
         const val EXTRA_IS_STREAMING = "IS_STREAMING"
         const val EXTRA_CURRENT_VOLUME = "CURRENT_VOLUME"
+        const val EXTRA_PHONE_MEDIA_MUTED = "PHONE_MEDIA_MUTED"
+        const val EXTRA_VOLUME_RECEIVER = "VOLUME_RECEIVER"
+        const val EXTRA_VOLUME_REQUEST_ID = "VOLUME_REQUEST_ID"
+        const val EXTRA_VOLUME_RECEIVERS = "VOLUME_RECEIVERS"
+        const val EXTRA_RECEIVER_VOLUMES = "RECEIVER_VOLUMES"
         const val EXTRA_DELAY_RECEIVER = "DELAY_RECEIVER"
         const val EXTRA_DELAY_RECEIVERS = "DELAY_RECEIVERS"
         const val EXTRA_RECEIVER_DELAY_MS = "RECEIVER_DELAY_MS"

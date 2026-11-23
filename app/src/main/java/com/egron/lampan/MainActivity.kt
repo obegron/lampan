@@ -318,6 +318,12 @@ fun MainScreen(
     var confirmForgetAirPlay2Pairing by remember { mutableStateOf(false) }
     var receiverPendingRemoval by remember { mutableStateOf<AirPlayDevice?>(null) }
     var volume by remember { mutableStateOf(prefsManager.getVolume()) }
+    var mutePhoneMediaEnabled by remember { mutableStateOf(prefsManager.isPhoneMediaMuteEnabled()) }
+    var phoneMediaMuted by remember { mutableStateOf(false) }
+    var receiverVolumes by remember { mutableStateOf(emptyMap<String, Int>()) }
+    var volumeRevision by remember { mutableStateOf(0) }
+    var volumeAcknowledgement by remember { mutableStateOf(0L) }
+    var volumeRequestId by remember { mutableStateOf(System.nanoTime()) }
     var showDebugInformation by remember {
         mutableStateOf(prefsManager.isDebugInformationEnabled())
     }
@@ -550,6 +556,7 @@ fun MainScreen(
                         AudioCaptureService.EXTRA_RECEIVER_ERROR,
                     )
                     isConnected = streamActive
+                    phoneMediaMuted = intent.getBooleanExtra(AudioCaptureService.EXTRA_PHONE_MEDIA_MUTED, false)
                     isConnecting = false
                     if (streamActive && active.isNotEmpty()) {
                         selectedReceiverAddresses = active
@@ -557,6 +564,15 @@ fun MainScreen(
                             AudioCaptureService.EXTRA_CURRENT_VOLUME,
                             volume,
                         )
+                        receiverVolumes = intent.getStringArrayListExtra(
+                            AudioCaptureService.EXTRA_VOLUME_RECEIVERS,
+                        ).orEmpty().zip(intent.getIntegerArrayListExtra(
+                            AudioCaptureService.EXTRA_RECEIVER_VOLUMES,
+                        ).orEmpty()).toMap()
+                        volumeRevision++
+                        volumeAcknowledgement = maxOf(volumeAcknowledgement, intent.getLongExtra(
+                            AudioCaptureService.EXTRA_VOLUME_REQUEST_ID, 0,
+                        ))
                     }
                     pendingReceiverAddresses = emptySet()
                     receiverError?.let { errorMessage = it }
@@ -925,6 +941,15 @@ fun MainScreen(
                     prefsManager.saveDebugInformationEnabled(enabled)
                 },
                 nowPlayingInformationEnabled = nowPlayingInformationEnabled,
+                mutePhoneMediaEnabled = mutePhoneMediaEnabled,
+                phoneMediaMuted = phoneMediaMuted,
+                onMutePhoneMediaChanged = { enabled ->
+                    mutePhoneMediaEnabled = enabled
+                    prefsManager.savePhoneMediaMuteEnabled(enabled)
+                    context.startService(Intent(context, AudioCaptureService::class.java).apply {
+                        action = AudioCaptureService.ACTION_REFRESH_PHONE_MUTE
+                    })
+                },
                 nowPlayingAccessEnabled = nowPlayingAccessEnabled,
                 onNowPlayingInformationChanged = { enabled ->
                     nowPlayingInformationEnabled = enabled
@@ -1606,6 +1631,29 @@ fun MainScreen(
                 }
             }
 
+            if (isConnected && receiverVolumes.isNotEmpty()) {
+                SpeakerVolumeCard(
+                    groupPercent = (volume * 100).roundToInt(),
+                    levels = receiverVolumes,
+                    revision = volumeRevision,
+                    acknowledgement = volumeAcknowledgement,
+                    names = receiverVolumes.keys.associateWith { address ->
+                        prefsManager.getAirPlayCapabilities(address)?.name ?: address
+                    },
+                    onChange = { address, percent ->
+                        val requestId = ++volumeRequestId
+                        val intent = Intent(context, AudioCaptureService::class.java).apply {
+                            action = "SET_VOLUME"
+                            putExtra("VOLUME", percent / 100f)
+                            putExtra(AudioCaptureService.EXTRA_VOLUME_REQUEST_ID, requestId)
+                            address?.let { putExtra(AudioCaptureService.EXTRA_VOLUME_RECEIVER, it) }
+                        }
+                        context.startService(intent)
+                        requestId
+                    },
+                )
+            }
+
             if (groupTimingReceivers.size > 1 && groupSyncProfile != null) {
                 val profile = requireNotNull(groupSyncProfile)
                 if (showCalibration && isConnected) {
@@ -1665,26 +1713,6 @@ fun MainScreen(
                 )
             }
 
-            if (isConnected) {
-                SectionCard(title = "Streaming") {
-                    Text("Volume", style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Slider(
-                        value = volume,
-                        onValueChange = { volume = it },
-                        onValueChangeFinished = {
-                            prefsManager.saveVolume(volume)
-                            val intent = Intent(context, AudioCaptureService::class.java).apply {
-                                action = "SET_VOLUME"
-                                putExtra("VOLUME", volume)
-                            }
-                            context.startService(intent)
-                        },
-                        valueRange = 0f..1f
-                    )
-                }
-            }
-
             if (showDebugInformation) SectionCard(title = "Logs") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1742,6 +1770,9 @@ private fun SettingsScreen(
     showDebugInformation: Boolean,
     onShowDebugInformationChanged: (Boolean) -> Unit,
     nowPlayingInformationEnabled: Boolean,
+    mutePhoneMediaEnabled: Boolean,
+    phoneMediaMuted: Boolean,
+    onMutePhoneMediaChanged: (Boolean) -> Unit,
     nowPlayingAccessEnabled: Boolean,
     onNowPlayingInformationChanged: (Boolean) -> Unit,
     onManageNowPlayingAccess: () -> Unit,
@@ -1811,6 +1842,15 @@ private fun SettingsScreen(
             }
         }
 
+        SectionCard(title = "Streaming") {
+            SettingsSwitchRow(
+                title = "Mute phone while streaming",
+                description = "Restore media sound when streaming stops.",
+                checked = mutePhoneMediaEnabled,
+                onCheckedChange = onMutePhoneMediaChanged,
+            )
+        }
+
         SectionCard(title = "Appearance") {
             SettingsSwitchRow(
                 title = "Dark theme",
@@ -1846,8 +1886,9 @@ private fun SettingsScreen(
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !phoneMediaMuted,
             ) {
-                Text("Play local test sound")
+                Text(if (phoneMediaMuted) "Phone media is muted" else "Play local test sound")
             }
         }
 
