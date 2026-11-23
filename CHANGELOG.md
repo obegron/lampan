@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.2
+
+- Add individual speaker volume controls alongside a group volume slider that
+  preserves the relative balance between speakers.
+- Add an optional "Mute phone while streaming" setting that restores phone
+  media sound when streaming stops.
+
 ## v0.6.1
 
 - Enable R8 optimization and resource shrinking for release APKs.
