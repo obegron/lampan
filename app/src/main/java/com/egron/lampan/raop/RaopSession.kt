@@ -9,7 +9,6 @@ import java.net.NetworkInterface
 import java.security.SecureRandom
 import java.security.Security
 import java.util.Random
-import javax.crypto.KeyAgreement
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair
 import org.bouncycastle.crypto.generators.X25519KeyPairGenerator
 import org.bouncycastle.crypto.KeyGenerationParameters
@@ -133,23 +132,21 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         )
         
         val authSetup = client.sendRequest("POST", "/auth-setup", authSetupHeaders, rawBody = authRequestBody)
-        if (authSetup.code != 200) {
-            val errorMsg = "AUTH-SETUP failed: ${authSetup.code}"
-            log(errorMsg)
-            throw Exception(errorMsg)
+        if (shouldUseRaopAuthSetupKey(authSetup)) {
+            val serverPublicKey = client.parseAuthSetupResponse(authSetup.rawBody)
+            val agreement = X25519Agreement()
+            agreement.init(bcClientKeyPair.private)
+            val sharedSecret = ByteArray(agreement.agreementSize)
+            agreement.calculateAgreement(X25519PublicKeyParameters(serverPublicKey, 0), sharedSecret, 0)
+            log("AirPlay 1 auth-setup key exchange completed")
+        } else {
+            // Legacy RAOP receivers such as ShairportQt acknowledge unknown POSTs
+            // with an empty 200 response. They accept the plain ALAC stream below.
+            log("Receiver does not implement auth-setup; continuing with legacy AirPlay 1")
         }
-        
+
         delay(200)
-        
-        val serverCurve25519PublicKeyBytes = client.parseAuthSetupResponse(authSetup.rawBody)
-        val bcAgreement = X25519Agreement()
-        bcAgreement.init(bcClientKeyPair.private)
-        val serverBCPublicKeyParams = X25519PublicKeyParameters(serverCurve25519PublicKeyBytes, 0)
-        val sharedSecretBytes = ByteArray(bcAgreement.agreementSize)
-        bcAgreement.calculateAgreement(serverBCPublicKeyParams, sharedSecretBytes, 0)
-        
-        log("Shared Secret (first 8 bytes): ${sharedSecretBytes.take(8).joinToString("") { "%02x".format(it) }}...")
-        
+
         // Announce AppleLossless (ALAC)
         val rtpMapLine = "a=rtpmap:96 AppleLossless"
 

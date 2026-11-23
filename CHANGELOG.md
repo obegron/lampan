@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.3
+
+- Fix AirPlay 1 connections to ShairportQt and other legacy receivers that
+  return an empty response or report no support for the optional auth-setup
+  request. Authentication failures and malformed public-key replies still
+  report errors.
+- Stop logging shared-secret bytes during AirPlay 1 connection setup.
+
 ## v0.6.2
 
 - Add individual speaker volume controls alongside a group volume slider that

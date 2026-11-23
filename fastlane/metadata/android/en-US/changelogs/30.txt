@@ -1,0 +1,1 @@
+Fix AirPlay 1 connections to ShairportQt and other legacy receivers that do not implement optional auth-setup. Preserve errors for authentication failures and malformed public-key replies. Stop logging shared-secret bytes during connection setup.
