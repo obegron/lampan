@@ -1,6 +1,7 @@
 package com.egron.lampan.raop
 
 import kotlinx.coroutines.runBlocking
+import com.egron.lampan.BuildConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -12,10 +13,14 @@ import kotlin.concurrent.thread
 
 class RaopAuthSetupTest {
     @Test
-    fun legacyReceiversReachAnnounceAfterOptionalAuthSetup() {
-        for (status in listOf(200, 404, 405, 501)) {
+    fun selectsClassicEncryptionOnlyWhenAuthSetupIsUnsupported() {
+        val replies = listOf(200, 404, 405, 501).map { it to ByteArray(0) } +
+            (200 to ByteArray(32) { (it + 1).toByte() })
+        for ((status, authBody) in replies) {
             ServerSocket(0).use { server ->
                 val methods = mutableListOf<String>()
+                var sdp = ""
+                val userAgents = mutableListOf<String>()
                 val serverError = AtomicReference<Throwable>()
                 val worker = thread(isDaemon = true) {
                     try {
@@ -28,15 +33,19 @@ class RaopAuthSetupTest {
                                 while (true) {
                                     val line = input.readLine() ?: error("Unexpected connection close")
                                     if (line.isEmpty()) break
+                                    if (line.startsWith("User-Agent:")) userAgents += line.substringAfter(':').trim()
                                     if (line.startsWith("Content-Length:", ignoreCase = true)) {
                                         length = line.substringAfter(':').trim().toInt()
                                     }
                                 }
-                                repeat(length) { check(input.read() != -1) }
+                                val body = CharArray(length) { input.read().also { check(it != -1) }.toChar() }.concatToString()
+                                if (index == 2) sdp = body
                                 // Stop at ANNOUNCE so this test needs no audio or UDP sockets.
                                 val code = when (index) { 0 -> 200; 1 -> status; else -> 400 }
+                                val responseBody = if (index == 1) authBody else ByteArray(0)
                                 socket.getOutputStream().write(
-                                    "RTSP/1.0 $code Test\r\nCSeq: ${index + 1}\r\n\r\n".toByteArray(),
+                                    ("RTSP/1.0 $code Test\r\nCSeq: ${index + 1}\r\n" +
+                                        "Content-Length: ${responseBody.size}\r\n\r\n").toByteArray() + responseBody,
                                 )
                                 socket.getOutputStream().flush()
                             }
@@ -55,6 +64,9 @@ class RaopAuthSetupTest {
                 assertEquals("ANNOUNCE failed: 400", failure.message)
                 assertEquals(listOf("OPTIONS *", "POST /auth-setup"), methods.take(2))
                 assertTrue(methods.last().startsWith("ANNOUNCE rtsp://"))
+                assertEquals(authBody.isEmpty(), sdp.contains("a=rsaaeskey:"))
+                assertEquals(authBody.isEmpty(), sdp.contains("a=aesiv:"))
+                assertEquals(List(3) { "Lampan/${BuildConfig.VERSION_NAME}" }, userAgents)
                 session.stop()
             }
         }

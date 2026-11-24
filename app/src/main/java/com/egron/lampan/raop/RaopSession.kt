@@ -1,6 +1,7 @@
 package com.egron.lampan.raop
 
 import android.util.Log
+import com.egron.lampan.BuildConfig
 import java.net.DatagramSocket
 import java.net.DatagramPacket
 import java.net.Inet4Address
@@ -51,6 +52,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
     private val syncTimeline = RtpNtpTimeline()
     internal var networkClock = NetworkClock()
     @Volatile private var timingRequestsReceived = 0
+    private var classicCrypto: ClassicRaopCrypto? = null
     private val encoder = AlacEncoder()
     private val random = Random() 
 
@@ -95,6 +97,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         firstSyncSent = false
         syncTimeline.reset()
         timingRequestsReceived = 0
+        classicCrypto = null
         
         if (clientInstance == null) { 
             val clientInstanceBytes = ByteArray(8)
@@ -111,7 +114,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         serverAddress = InetAddress.getByName(host)
 
         val options = client.sendRequest("OPTIONS", "*", mapOf(
-            "User-Agent" to "Lampan/0.1.0",
+            "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}",
             "DACP-ID" to clientInstance!!,
             "Client-Instance" to clientInstance!!
         ))
@@ -128,7 +131,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
            "Content-Type" to "application/octet-stream",
            "Client-Instance" to clientInstance!!,
            "DACP-ID" to clientInstance!!,
-           "User-Agent" to "Lampan/0.1.0"
+           "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}"
         )
         
         val authSetup = client.sendRequest("POST", "/auth-setup", authSetupHeaders, rawBody = authRequestBody)
@@ -140,9 +143,9 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             agreement.calculateAgreement(X25519PublicKeyParameters(serverPublicKey, 0), sharedSecret, 0)
             log("AirPlay 1 auth-setup key exchange completed")
         } else {
-            // Legacy RAOP receivers such as ShairportQt acknowledge unknown POSTs
-            // with an empty 200 response. They accept the plain ALAC stream below.
-            log("Receiver does not implement auth-setup; continuing with legacy AirPlay 1")
+            // Legacy receivers use RSA-wrapped AES keys in SDP instead of auth-setup.
+            classicCrypto = ClassicRaopCrypto()
+            log("Receiver does not implement auth-setup; using classic RAOP AES encryption")
         }
 
         delay(200)
@@ -158,13 +161,14 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
              "m=audio 0 RTP/AVP 96\r\n" +
              "$rtpMapLine\r\n" +
              "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n" +
+             (classicCrypto?.sdpAttributes() ?: "") +
              "a=min-latency:${AirPlaySyncPacket.MIN_LATENCY_FRAMES}"
 
         val announceHeaders = mapOf(
             "Content-Type" to "application/sdp",
             "Client-Instance" to clientInstance!!,
             "DACP-ID" to clientInstance!!,
-            "User-Agent" to "Lampan/0.1.0"
+            "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}"
         )
 
         val announce = client.sendRequest("ANNOUNCE", "rtsp://$clientIp/$sessionId", 
@@ -193,7 +197,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         val setupHeaders = mapOf(
              "Client-Instance" to clientInstance!!,
              "DACP-ID" to clientInstance!!,
-             "User-Agent" to "Lampan/0.1.0",
+             "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}",
              "Transport" to "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=$clientControlPort;timing_port=$clientTimingPort"
         )
         
@@ -224,7 +228,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
         val recordHeaders = mutableMapOf(
              "Client-Instance" to clientInstance!!,
              "DACP-ID" to clientInstance!!,
-             "User-Agent" to "Lampan/0.1.0",
+             "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}",
              "Range" to "npt=0-",
              "RTP-Info" to "seq=$rtpSeqNum;rtptime=$rtpTimestamp"
         )
@@ -370,7 +374,8 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
                 marker = packetCount == 0L // Set marker bit for the first audio packet
             )
             
-            val packetBytes = packet.toByteArray()
+            val plainPacket = packet.toByteArray()
+            val packetBytes = classicCrypto?.encryptRaopAudioPacket(plainPacket) ?: plainPacket
             if (serverAddress != null) {
                 val dp = DatagramPacket(packetBytes, packetBytes.size, serverAddress!!, serverAudioPort)
                 clientAudioSocket?.send(dp)
@@ -423,7 +428,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
                 "Content-Type" to "text/parameters",
                 "Client-Instance" to clientInstance!!,
                 "DACP-ID" to clientInstance!!,
-                "User-Agent" to "Lampan/0.1.0"
+                "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}"
             )
             if (serverSession != null) {
                 headers["Session"] = serverSession!!
@@ -441,7 +446,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             "Content-Type" to "text/parameters",
             "Client-Instance" to clientInstance!!,
             "DACP-ID" to clientInstance!!,
-            "User-Agent" to "Lampan/0.1.0",
+            "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}",
         )
         serverSession?.let { headers["Session"] = it }
         val response = client.sendRequest(
@@ -458,7 +463,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             val headers = mutableMapOf(
                 "Client-Instance" to clientInstance!!,
                 "DACP-ID" to clientInstance!!,
-                "User-Agent" to "Lampan/0.1.0"
+                "User-Agent" to "Lampan/${BuildConfig.VERSION_NAME}"
             )
             if (serverSession != null) {
                 headers["Session"] = serverSession!!
@@ -468,6 +473,7 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             e.printStackTrace()
         }
         client.close()
+        classicCrypto = null
         clientControlSocket?.close()
         clientTimingSocket?.close()
         clientAudioSocket?.close()

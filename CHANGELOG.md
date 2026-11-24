@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.4
+
+- Fix AirPlay 1 playback on Kodi/LibreELEC receivers by announcing an
+  RSA-wrapped AES key and IV and encrypting audio packets when the receiver
+  does not implement auth-setup.
+- Report the actual app version in the AirPlay 1 User-Agent header.
+
 ## v0.6.3
 
 - Fix AirPlay 1 connections to ShairportQt and other legacy receivers that

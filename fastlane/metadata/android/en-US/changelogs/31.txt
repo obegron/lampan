@@ -1,0 +1,1 @@
+Fix AirPlay 1 playback on Kodi/LibreELEC receivers using classic RAOP audio encryption when auth-setup is unsupported. Report the actual app version in the AirPlay 1 User-Agent header.
