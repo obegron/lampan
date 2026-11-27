@@ -119,6 +119,15 @@ class RaopSession(private var host: String, private val port: Int = 7000, privat
             "Client-Instance" to clientInstance!!
         ))
         log("OPTIONS code ${options.code}")
+        if (options.code == 401 || options.code == 403) {
+            throw IllegalStateException(
+                "AirPlay 1 OPTIONS rejected: RTSP ${options.code}. " +
+                    "The receiver may require pairing or different access settings, even if no " +
+                    "AirPlay password is set. For HomePod or newer Apple receivers, " +
+                    "try selecting AirPlay 2 in Lampan and leave the password blank " +
+                    "if none is configured. Also check the receiver's AirPlay access settings.",
+            )
+        }
 
         val bcClientKeyPair = generateCurve25519KeyPairBouncyCastle()
         val clientPublicKeyBytes = (bcClientKeyPair.public as X25519PublicKeyParameters).encoded

@@ -13,6 +13,60 @@ import kotlin.concurrent.thread
 
 class RaopAuthSetupTest {
     @Test
+    fun optionsAuthenticationRejectionStopsBeforeLegacyAuthSetup() {
+        for (status in listOf(401, 403)) {
+            ServerSocket(0).use { server ->
+                val methods = mutableListOf<String>()
+                val serverError = AtomicReference<Throwable>()
+                val worker = thread(isDaemon = true) {
+                    try {
+                        server.accept().use { socket ->
+                            socket.soTimeout = 3_000
+                            val input = socket.getInputStream().bufferedReader(Charsets.ISO_8859_1)
+                            while (true) {
+                                val request = input.readLine() ?: break
+                                methods += request.substringBefore(' ')
+                                var length = 0
+                                while (true) {
+                                    val line = input.readLine() ?: error("Unexpected connection close")
+                                    if (line.isEmpty()) break
+                                    if (line.startsWith("Content-Length:", ignoreCase = true)) {
+                                        length = line.substringAfter(':').trim().toInt()
+                                    }
+                                }
+                                repeat(length) { check(input.read() != -1) }
+                                val code = if (methods.size == 1) status else 200
+                                socket.getOutputStream().write(
+                                    ("RTSP/1.0 $code Test\r\n" +
+                                        "Content-Length: 0\r\n\r\n").toByteArray(),
+                                )
+                                socket.getOutputStream().flush()
+                            }
+                        }
+                    } catch (error: Throwable) {
+                        serverError.set(error)
+                    }
+                }
+                val session = RaopSession("127.0.0.1", server.localPort) {}
+                try {
+                    val failure = assertThrows(IllegalStateException::class.java) {
+                        runBlocking { session.connect() }
+                    }
+                    assertTrue(failure.message!!.startsWith("AirPlay 1 OPTIONS rejected: RTSP $status."))
+                    assertTrue(failure.message!!.contains("try selecting AirPlay 2"))
+                    assertTrue(failure.message!!.contains("AirPlay access settings"))
+                } finally {
+                    session.stop()
+                }
+                worker.join(5_000)
+                assertFalse("Fake receiver did not finish", worker.isAlive)
+                serverError.get()?.let { throw AssertionError("Fake receiver failed", it) }
+                assertEquals(listOf("OPTIONS", "TEARDOWN"), methods)
+            }
+        }
+    }
+
+    @Test
     fun selectsClassicEncryptionOnlyWhenAuthSetupIsUnsupported() {
         val replies = listOf(200, 404, 405, 501).map { it to ByteArray(0) } +
             (200 to ByteArray(32) { (it + 1).toByte() })
